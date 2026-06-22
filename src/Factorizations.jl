@@ -344,13 +344,94 @@ end
 # Convention: H_k = I − v_k v_kᵀ / τ_k  (divides by τ, matching faer's `make_householder_in_place`).
 # τ_k = Inf encodes a trivial (identity) reflector; v_k has implicit leading 1 at index k.
 #
-# Planned layers (Layer D):
-#   D-A  golden harness only (done: bench/rust_compare/qr_verify.rs + test/factorizations_tests.jl @testitem "qr_golden")
-#   D-B  qr_in_place_unblocked! — column-by-column Householder reduction (base kernel, n ≤ threshold)
-#   D-C  qr_in_place_blocked!   — blocked driver: panel reduction + trailing update via WY representation
-#
-# The golden file is bench/rust_compare/qr_golden.txt.  Regenerate:
-#   cd bench/rust_compare/rust && cargo build --release --bin qr_verify
-#   ./target/release/qr_verify > ../qr_golden.txt
+# Layer D-B (done): qr_unblocked!  — faithful port of faer `qr_in_place_unblocked` + `make_householder_in_place`.
+# Layer D-C (planned): blocked driver (compact-WY block reflectors I − V T⁻¹ Vᵀ).
+# Golden: bench/rust_compare/qr_golden.txt (regen: cargo build --release --bin qr_verify > ../qr_golden.txt).
+
+export qr_unblocked!
+
+"""
+    qr_unblocked!(A, tau) -> true
+
+In-place unpivoted Householder QR — faithful port of faer 0.24.1 `qr_in_place_unblocked` +
+`make_householder_in_place` (real f64). On output the upper triangle of `A` (incl. diagonal) is `R`, the
+essential Householder vectors `v_k` (with implicit `v_k[k]=1`) are stored below the diagonal of column k,
+and `tau[k]` holds the coefficient (faer convention `H_k = I − v_k v_kᵀ / tau_k`; `tau=Inf` ⇒ identity).
+Per-element arithmetic mirrors faer (ascending-i FMA dot/update; `hypot` norm; `sign(head)`; scale by
+`1/(head+signed_norm)`); the only non-bit-exact piece vs the golden is `‖tail‖₂` (faer's `norm_l2` may
+rescale) — reconstruction stays ~1e-13. Vectorized over rows with `Vec{W}`.
+"""
+function qr_unblocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64})
+    m, n = size(A)
+    ld = stride(A, 2)
+    GC.@preserve A begin
+        p = pointer(A)
+        @inbounds for col in 1:min(m, n)
+            row = col
+            # ── reflector from x = A[row:m, col] ──
+            tn = 0.0
+            i = row + 1
+            while i + W - 1 <= m                      # ‖tail‖² (vectorized)
+                x = vload(Vec{W,Float64}, _vptr(p, i, col, ld))
+                tn += sum(x * x)
+                i += W
+            end
+            while i <= m
+                x = unsafe_load(p, _lidx(i, col, ld)); tn = muladd(x, x, tn); i += 1
+            end
+            tail_norm = sqrt(tn)
+            head = unsafe_load(p, _lidx(row, col, ld))
+            head_norm = abs(head)
+            if tail_norm < floatmin(Float64)
+                tau[col] = Inf                          # trivial reflector (identity)
+                continue
+            end
+            nrm = hypot(head_norm, tail_norm)
+            signed_norm = (head >= 0.0 ? nrm : -nrm)    # sign(head)·norm (faer: +norm if head==0)
+            hwb = head + signed_norm
+            hwb_inv = 1.0 / hwb
+            vinv = Vec{W,Float64}(hwb_inv)
+            i = row + 1                                  # v_essential = tail · (1/hwb)
+            while i + W - 1 <= m
+                b = _vptr(p, i, col, ld); vstore(vload(Vec{W,Float64}, b) * vinv, b); i += W
+            end
+            while i <= m
+                unsafe_store!(p, unsafe_load(p, _lidx(i, col, ld)) * hwb_inv, _lidx(i, col, ld)); i += 1
+            end
+            unsafe_store!(p, -signed_norm, _lidx(row, col, ld))   # R diagonal = β
+            t = 0.5 * (1.0 + (tail_norm * abs(hwb_inv))^2)
+            tau[col] = t
+            tinv = 1.0 / t
+            # ── apply H_col to trailing columns j: x_j -= (vᵀx_j / tau)·v ──
+            for j in col+1:n
+                acc = Vec{W,Float64}(0.0)
+                dscal = unsafe_load(p, _lidx(row, j, ld))        # v_row=1 contribution
+                i = row + 1
+                while i + W - 1 <= m
+                    acc = muladd(vload(Vec{W,Float64}, _vptr(p, i, col, ld)),
+                        vload(Vec{W,Float64}, _vptr(p, i, j, ld)), acc)
+                    i += W
+                end
+                dot = dscal + sum(acc)
+                while i <= m
+                    dot = muladd(unsafe_load(p, _lidx(i, col, ld)), unsafe_load(p, _lidx(i, j, ld)), dot); i += 1
+                end
+                k = -dot * tinv
+                unsafe_store!(p, unsafe_load(p, _lidx(row, j, ld)) + k, _lidx(row, j, ld))
+                vk = Vec{W,Float64}(k)
+                i = row + 1
+                while i + W - 1 <= m
+                    bj = _vptr(p, i, j, ld)
+                    vstore(muladd(vk, vload(Vec{W,Float64}, _vptr(p, i, col, ld)), vload(Vec{W,Float64}, bj)), bj)
+                    i += W
+                end
+                while i <= m
+                    unsafe_store!(p, muladd(k, unsafe_load(p, _lidx(i, col, ld)), unsafe_load(p, _lidx(i, j, ld))), _lidx(i, j, ld)); i += 1
+                end
+            end
+        end
+    end
+    return true
+end
 
 end # module Factorizations

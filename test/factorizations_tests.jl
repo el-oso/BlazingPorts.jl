@@ -120,6 +120,47 @@ end
     end
 end
 
+@testitem "qr_unblocked" tags = [:qr] begin
+    # Layer D-B: our unpivoted Householder QR (qr_unblocked!) must reconstruct A and match faer's QR
+    # factors numerically (R/v are mathematically unique, so our unblocked output ≈ faer's, even where
+    # faer used its blocked path; not bit-exact due to norm_l2 ordering).
+    using BlazingPorts.Factorizations: qr_unblocked!
+    using LinearAlgebra: triu, I
+    include(joinpath(@__DIR__, "golden.jl"))
+    golden = load_qr_golden()
+
+    reconQR(QR, tau, n) = begin
+        R = triu(QR); Q = Matrix{Float64}(I, n, n)
+        for k in 1:n
+            t = tau[k]; isinf(t) && continue
+            v = [i == 1 ? 1.0 : QR[k+i-1, k] for i in 1:(n - k + 1)]
+            Q[:, k:n] .-= (Q[:, k:n] * v) * v' ./ t
+        end
+        Q * R
+    end
+
+    for n in sort(collect(keys(golden)))
+        A0 = golden[n].A
+        A = copy(A0); tau = zeros(n)
+        @test qr_unblocked!(A, tau) === true
+        @test isapprox(reconQR(A, tau, n), A0; rtol = 1e-9)        # Q*R ≈ A
+        @test isapprox(A, golden[n].QR; rtol = 1e-10, atol = 1e-12) # matches faer's packed factor
+    end
+end
+
+@testitem "qr_strictmode" tags = [:qr] begin
+    # The QR base kernel must be vectorized, allocation-free, type-stable.
+    using BlazingPorts.Factorizations: qr_unblocked!
+    using StrictMode, AllocCheck, JET
+    using LinearAlgebra
+    A = randn(96, 96); tau = zeros(96)
+    qr_unblocked!(copy(A), tau)  # warm
+    @assert_typestable qr_unblocked!(A, tau)
+    @assert_noalloc qr_unblocked!(A, tau)
+    @assert_vectorized qr_unblocked!(A, tau)
+    @test (@allocated qr_unblocked!(A, tau)) == 0
+end
+
 @testitem "factorizations_strictmode" tags = [:factorizations] begin
     # StrictMode guarantees — the campaign's headline experiment. The full driver `cholesky_llt!` is
     # type-stable and allocation-free; the SIMD lives in the three pointer kernels (the wrapper itself
