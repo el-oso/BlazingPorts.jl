@@ -5,7 +5,8 @@ benchmarked against the real crate (Rust via a vendored cdylib, `ccall`). Siblin
 [PureFFT.jl](../PureFFT.jl) (rustfft → pure-Julia FFT), which is the proven template.
 
 The point isn't to win benchmarks — it's to find where StrictMode's performance guarantees hold,
-miss, or need a new lever. See the campaign tracker `../blazingly-fast-rust-crates.md`.
+miss, or need a new lever. See [`RESULTS.md`](RESULTS.md) for the verdict table and findings (the
+in-repo source of truth), and the cross-project index `../blazingly-fast-rust-crates.md`.
 
 ## Probe-first
 
