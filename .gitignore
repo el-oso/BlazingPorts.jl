@@ -1,0 +1,19 @@
+# Julia
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Documenter / Node
+docs/build/
+**/.documenter/
+node_modules/
+
+# Rust comparison-crate build artifacts
+**/target/
+Cargo.lock
+
+# Generated probe plots are kept (docs/assets/*.png) but probe scratch is not
+bench/results/
+
+.DS_Store

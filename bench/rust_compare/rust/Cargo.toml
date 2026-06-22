@@ -1,0 +1,21 @@
+[package]
+name = "blazing_compare"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "blazing_compare"
+crate-type = ["cdylib"]
+
+# C-ABI shims so Julia can ccall the real Rust crates and benchmark Rust-vs-Julia in the SAME
+# process (same thermal/frequency state, interleaved per size) — the only reliable parity probe.
+# All probes are SINGLE-THREADED: build/run with RAYON_NUM_THREADS=1; no crate here enables threads.
+[dependencies]
+matrixmultiply = "0.3"   # bluss gemm microkernel (Tier 1)
+libm = "0.2"             # erf / gamma / exp / log reference kernels (Tier 1, statrs/libm)
+glam = "0.29"            # Vec3/Vec4/Mat4 SIMD game math (Tier 2)
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
