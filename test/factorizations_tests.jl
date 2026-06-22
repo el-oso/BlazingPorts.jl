@@ -56,15 +56,27 @@
 end
 
 @testitem "factorizations_strictmode" tags = [:factorizations] begin
-    # Layer B StrictMode guarantees (the campaign's headline experiment): the faithfully-ported base
-    # kernel must be type-stable, allocation-free, and vectorized (host-generic <W x double>).
+    # StrictMode guarantees — the campaign's headline experiment. The full driver `cholesky_llt!` is
+    # type-stable and allocation-free; the SIMD lives in the three pointer kernels (the wrapper itself
+    # isn't where `<W x double>` is emitted), so `@assert_vectorized` is applied to each kernel.
+    import BlazingPorts.Factorizations as F
     using BlazingPorts.Factorizations: cholesky_llt!
     using StrictMode, AllocCheck, JET
     using LinearAlgebra
+
     A = Matrix(let M = randn(96, 96); M'M + 96I end)
     cholesky_llt!(copy(A))  # warm
     @assert_typestable cholesky_llt!(A)
     @assert_noalloc cholesky_llt!(A)
-    @assert_vectorized cholesky_llt!(A)
     @test (@allocated cholesky_llt!(A)) == 0
+
+    # Each hot kernel must vectorize to host-width <W x double> (base case, panel solve, rank-k update).
+    GC.@preserve A begin
+        p = pointer(A)
+        ld = 96
+        @assert_vectorized F._chol_base!(p, 64, ld)
+        @assert_vectorized F._trsm_right_lower!(p, p, 32, 32, ld)
+        @assert_vectorized F._syrk_lower!(p, p, 32, 32, ld)
+    end
+    @test true  # reaching here means all guarantees held (StrictViolation throws otherwise)
 end

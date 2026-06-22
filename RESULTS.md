@@ -151,11 +151,38 @@ LAPACK + a Hermitian/symmetrize layer, so it's *slower* than bare OpenBLAS and l
 FastCholesky 0.76× faer, vs OpenBLAS 0.90×). So Cholesky has **no** pure-Julia medium-n answer — the
 gap is real.
 
-➡ **Next: prototype a pure-Julia recursive blocked Cholesky / QR** in a `Factorizations` submodule,
-gated by `@assert_vectorized`/`@unroll`/`@assert_noalloc` — these have no pure-Julia recursive
-equivalent and faer wins them at n≥256. RF beating faer at small-n LU shows pure Julia *can* win at
-these sizes; the open question is whether StrictMode's levers reach faer for Cholesky/QR or re-expose
-the instruction-scheduling ceiling (`StrictMode docs/src/rust_gaps.md`).
+## Cholesky port — faer reimplementation (Factorizations.jl)
+
+Faithful PureFFT-style port of faer 0.24.1 `cholesky_recursion_right_looking` (LLᵀ), bit-exact verified
+vs faer golden (`bench/rust_compare/cholesky_golden.txt`), generic-ISA (`SIMD.jl Vec{W}`, W=host width).
+
+- **Layer B — base kernel (n≤64, `simd_cholesky`)**: **bit-exact** vs faer golden for all n≤64;
+  StrictMode `@assert_vectorized`+`@assert_noalloc`(0 B)+`@assert_typestable` all PASS;
+  `@code_llvm` = 48× `<8 x double>` (AVX-512), `<4 x double>` on AVX2. **It even beats faer ~1.5× at
+  n=64** (L1-resident; the SIMD FMA kernel is excellent).
+- **Layer C — right-looking recursive driver (block 128, threshold 64; trsm + syrk trailing update)**:
+  *correct* (reconstruction ~1e-15; not bit-exact at n≥96 — naive trsm/syrk accumulate in a different
+  order than faer's microkernel, ≤3.9e-11 rel). **But performance falls off a cliff:**
+
+  | n | BlazingPorts | faer | OpenBLAS | vs faer |
+  |---|--------------|------|----------|---------|
+  | 64  | **4876 ns** | 7524 | 6007 | **1.54× (win)** |
+  | 128 | 40236 ns | 28734 | 28704 | 0.71× |
+  | 256 | 625687 ns | 153438 | 166883 | **0.25×** |
+  | 512 | ~7.9 ms | ~1.0 ms | 1.12 ms | ~0.14× |
+
+**StrictMode verdict (the campaign's core question):** the guarantees **hold on every kernel** (base,
+trsm, syrk all vectorized + noalloc + typestable) — yet that is **necessary, not sufficient** for
+parity. The trailing `syrk` is vectorized & allocation-free but 4× slower than faer at n=256 because it
+lacks **cache/register tiling** (no L1/L2 blocking, no register-blocked microkernel). This is exactly
+the **instruction-scheduling / microkernel ceiling** (`StrictMode docs/src/rust_gaps.md`):
+`@assert_vectorized` confirms SIMD emission but cannot see blocking quality. **New-lever finding:**
+reaching faer needs a tiled-microkernel guarantee/lever beyond vectorized+noalloc (or it's explicitly
+out of StrictMode's scope, per the ceiling doc).
+
+➡ **Next iteration**: tile the trailing update — either the plan's `@turbo` gemm for `syrk` (auto
+cache/register blocking; bit-exactness already relaxed at block level) or a hand-tiled `SIMD.jl`
+microkernel. Then re-probe n≥256. (QR — Layer D — follows once Cholesky reaches parity.)
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
