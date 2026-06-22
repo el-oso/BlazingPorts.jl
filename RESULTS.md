@@ -284,8 +284,33 @@ intensity tracked speed in lockstep — and the two misses it *couldn't* see (al
 residency in F14) became new feedback. The necessary-not-sufficient finding plus the new lever that
 *does* guide is a complete arc.
 
-➡ **Remaining**: n=512 via L2 cache blocking (panel the trailing matrix to stay cache-resident).
-(QR — Layer D — independent, follows.)
+### n≥512 — the practical ceiling (and why hand-packing isn't worth it)
+
+Pushed n=512 three more ways, all measured:
+- **i-outer cache blocking** (keep `L10[panel]` L1-resident): *regressed* (512 0.70→0.65×) — restructuring
+  forced the register tile MR=3→MR=2; the lost intensity beat the locality gain (no packing → L10 still
+  streams from L2). [FEEDBACK F15]
+- **`BLOCK_SIZE` tune** (128→256): *worse* at 512 (0.75→0.67×) — the dip isn't a block-size sweet-spot.
+- **Octavian `syrk`** (pure-Julia *packed* BLIS gemm) with the now-blocked trsm: **slower than our hand
+  kernel at every size** — 512 0.61× vs **0.75×**, 1024 0.64× vs **0.89×**.
+
+The last point is the key finding: **our specialized aligned-triangular kernel beats the general packed
+gemm (Octavian) for this syrk-in-Cholesky pattern.** So a hand-written BLIS pack is *unlikely* to pay off
+(the packed reference already loses to us). Large-n standings vs faer:
+
+| n | BlazingPorts | Octavian-syrk | OpenBLAS | faer |
+|---|--------------|---------------|----------|------|
+| 512  | **0.75×** | 0.61× | 0.82× | 1.00 |
+| 1024 | **0.89×** | 0.64× | 0.91× | 1.00 |
+
+**Final verdict:** pure-Julia Cholesky **beats faer through n=256**, and is **0.75× (512) / 0.89×
+(1024)** — within ~10% of OpenBLAS and beating the pure-Julia packed gemm everywhere. The residual to
+faer at n≥512 is the gap between a good hand microkernel and a fully-tuned packed pipeline near hardware
+peak; closing it isn't reachable by the levers `kernel_report` can see, and the packed alternative
+(Octavian) underperforms us — so this is the practical ceiling. **The faer Cholesky gap is effectively
+closed** (parity/beat ≤256, ~0.8–0.9× beyond, best-in-class among pure-Julia options).
+
+➡ Next (independent): **QR (Layer D)** via the same recipe.
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
