@@ -260,8 +260,32 @@ our kernels it correctly ranks them — the thing `@assert_vectorized` couldn't 
 So StrictMode now *guides* the optimization: it flags trsm (1.08) and syrk (1.61) as "more blocking may
 help" — the next levers (MR=2 tiles, L2 cache blocking) to push n≥256 toward faer.
 
-➡ **Next**, guided by `kernel_report`: raise syrk/trsm intensity (MR=2 register tiles + L2 cache
-blocking) toward faer at n≥256. (QR — Layer D — independent, follows.)
+### ✅ PARITY REACHED through n=256 — beats faer (the aligned-triangular breakthrough)
+
+The parity push, guided by `kernel_report`, landed: register tiling (MR=2→MR=3, intensity 0.82→1.99)
+got n=256 to 0.83×, then the decisive lever was **aligned-triangular syrk** — skip the fully-upper
+row-blocks (≈half the flops) but start each column block's sweep at the **W-aligned** grid point ≤ j so
+loads stay aligned (the naive `i=j` triangular had *regressed* purely on misalignment). Final
+single-threaded standings vs faer (and we beat OpenBLAS too through 256):
+
+| n | BlazingPorts | faer | OpenBLAS | verdict |
+|---|--------------|------|----------|---------|
+| 64  | 5160 ns  | 7741 | (1.22×) | **1.50× — beat** |
+| 128 | 20699 ns | 28834 | (0.98×) | **1.39× — beat** |
+| 256 | 149191 ns | 154751 | (0.89×) | **1.04× — beat (parity)** |
+| 512 | 1.39 ms  | 0.97 ms | (0.75×) | 0.70× — only laggard |
+
+So a **hand-written pure-Julia Cholesky beats faer (and OpenBLAS) single-threaded through n=256** —
+the campaign's "faer gap" is *closed* up to 256. Only **n=512** remains (0.70×), where the working set
+spills L2 and needs cache blocking (faer's 0.97 ms is near hardware peak).
+
+**The StrictMode story is the headline**: `kernel_report` (shipped from F10) steered the whole push —
+intensity tracked speed in lockstep — and the two misses it *couldn't* see (alignment in F13, cache-
+residency in F14) became new feedback. The necessary-not-sufficient finding plus the new lever that
+*does* guide is a complete arc.
+
+➡ **Remaining**: n=512 via L2 cache blocking (panel the trailing matrix to stay cache-resident).
+(QR — Layer D — independent, follows.)
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.

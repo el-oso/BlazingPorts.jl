@@ -182,8 +182,8 @@ end
 const NC = 4
 
 @inline function _syrk_panel!(p11, p10, j::Int, m::Int, bs::Int, ld::Int)
-    # one column j of A11: A11[i,j] -= Σ_c L10[j,c]·L10[i,c]
-    i = 1
+    # one column j of A11 (lower, W-aligned start): A11[i,j] -= Σ_c L10[j,c]·L10[i,c]
+    i = ((j - 1) ÷ W) * W + 1
     @inbounds while i + W - 1 <= m
         b = _vptr(p11, i, j, ld); a = vload(Vec{W,Float64}, b)
         for c in 1:bs
@@ -204,10 +204,11 @@ end
 function _syrk_lower!(p11::Ptr{Float64}, p10::Ptr{Float64}, m::Int, bs::Int, ld::Int)
     j = 1
     @inbounds while j + NC - 1 <= m
-        # NB: computing the full m×m (i from 1) — counter-intuitively faster than the triangular variant
-        # (i from j): the aligned, regular, full-length row tiles beat the irregular/misaligned triangular
-        # sweep, even at 2× the flops. (Tried i=j: regressed n=256 0.83→0.74×.)
-        i = 1
+        # ALIGNED-TRIANGULAR: skip the fully-upper row-blocks above this column block, but start at the
+        # W-aligned grid point ≤ j so the vector tiles stay aligned (the naive `i=j` triangular regressed
+        # on misalignment). Recovers ~half the flops; the <W upper sliver in [istart, j) is computed into
+        # never-read memory (harmless).
+        i = ((j - 1) ÷ W) * W + 1
         while i + 3W - 1 <= m   # MR=3 × NC=4 = 12 accumulators (reuse 3 row-vector loads across 4 cols)
             r1 = i + W; r2 = i + 2W
             e00 = _vptr(p11, i, j, ld);      A00 = vload(Vec{W,Float64}, e00)
