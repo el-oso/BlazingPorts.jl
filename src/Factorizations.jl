@@ -205,6 +205,28 @@ function _syrk_lower!(p11::Ptr{Float64}, p10::Ptr{Float64}, m::Int, bs::Int, ld:
     j = 1
     @inbounds while j + NC - 1 <= m
         i = 1
+        while i + 2W - 1 <= m   # MR=2 × NC=4 = 8 accumulators (reuse 2 row-vector loads across 4 cols)
+            r1 = i + W
+            d00 = _vptr(p11, i, j, ld);     A00 = vload(Vec{W,Float64}, d00)
+            d10 = _vptr(p11, r1, j, ld);    B00 = vload(Vec{W,Float64}, d10)
+            d01 = _vptr(p11, i, j + 1, ld); A01 = vload(Vec{W,Float64}, d01)
+            d11 = _vptr(p11, r1, j + 1, ld); B01 = vload(Vec{W,Float64}, d11)
+            d02 = _vptr(p11, i, j + 2, ld); A02 = vload(Vec{W,Float64}, d02)
+            d12 = _vptr(p11, r1, j + 2, ld); B02 = vload(Vec{W,Float64}, d12)
+            d03 = _vptr(p11, i, j + 3, ld); A03 = vload(Vec{W,Float64}, d03)
+            d13 = _vptr(p11, r1, j + 3, ld); B03 = vload(Vec{W,Float64}, d13)
+            for c in 1:bs
+                v0 = vload(Vec{W,Float64}, _vptr(p10, i, c, ld))
+                v1 = vload(Vec{W,Float64}, _vptr(p10, r1, c, ld))
+                g0 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j, c, ld)));     A00 = muladd(g0, v0, A00); B00 = muladd(g0, v1, B00)
+                g1 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 1, c, ld))); A01 = muladd(g1, v0, A01); B01 = muladd(g1, v1, B01)
+                g2 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 2, c, ld))); A02 = muladd(g2, v0, A02); B02 = muladd(g2, v1, B02)
+                g3 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 3, c, ld))); A03 = muladd(g3, v0, A03); B03 = muladd(g3, v1, B03)
+            end
+            vstore(A00, d00); vstore(A01, d01); vstore(A02, d02); vstore(A03, d03)
+            vstore(B00, d10); vstore(B01, d11); vstore(B02, d12); vstore(B03, d13)
+            i += 2W
+        end
         while i + W - 1 <= m
             b0 = _vptr(p11, i, j, ld);     a0 = vload(Vec{W,Float64}, b0)
             b1 = _vptr(p11, i, j + 1, ld); a1 = vload(Vec{W,Float64}, b1)
