@@ -253,3 +253,117 @@ pub extern "C" fn ndarray_strided_sum(
     let sliced = arr.slice(s![..;stride as isize]);
     sliced.sum()
 }
+
+// ── rand + rand_distr (Tier 4): PRNG fill benchmarks. ────────────────────────────────────────────
+// Uses SmallRng (Xoshiro256++ under the hood) — the same algorithm family as Julia's default
+// Xoshiro RNG — for an apples-to-apples PRNG comparison.  The RNG state is held in a static
+// Mutex so it persists across calls (we never reseed in the timed region, matching the Julia side
+// which reuses a single Xoshiro object).
+//
+// Safety: all three functions operate on a globally-shared RNG behind a Mutex; single-threaded
+// probes grab the lock once per call (negligible overhead for N=1_000_000 fills).
+
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
+use rand::Rng;
+use rand_distr::{StandardNormal, Exp1, Distribution};
+
+// Thread-local SmallRng (Xoshiro256++) — never reseeded in the timed region.
+// Thread-local avoids Mutex overhead; single-threaded probes use one thread so this is correct.
+std::thread_local! {
+    static RAND_RNG: std::cell::RefCell<SmallRng> =
+        std::cell::RefCell::new(SmallRng::seed_from_u64(0x1234_5678_abcd_ef01));
+}
+
+/// Fill `out[0..n]` with uniform [0,1) f64 samples from SmallRng (Xoshiro256++).
+#[unsafe(no_mangle)]
+pub extern "C" fn rand_uniform_fill(out: *mut c_double, n: usize) {
+    let slice = unsafe { std::slice::from_raw_parts_mut(out, n) };
+    RAND_RNG.with(|cell| {
+        let mut rng = cell.borrow_mut();
+        for x in slice.iter_mut() {
+            *x = rng.random::<f64>();
+        }
+    });
+}
+
+/// Fill `out[0..n]` with standard-normal f64 samples from SmallRng (ziggurat via rand_distr).
+#[unsafe(no_mangle)]
+pub extern "C" fn rand_normal_fill(out: *mut c_double, n: usize) {
+    let slice = unsafe { std::slice::from_raw_parts_mut(out, n) };
+    RAND_RNG.with(|cell| {
+        let mut rng = cell.borrow_mut();
+        for x in slice.iter_mut() {
+            *x = StandardNormal.sample(&mut *rng);
+        }
+    });
+}
+
+/// Fill `out[0..n]` with Exp(1) f64 samples from SmallRng (ziggurat via rand_distr).
+#[unsafe(no_mangle)]
+pub extern "C" fn rand_exp_fill(out: *mut c_double, n: usize) {
+    let slice = unsafe { std::slice::from_raw_parts_mut(out, n) };
+    RAND_RNG.with(|cell| {
+        let mut rng = cell.borrow_mut();
+        for x in slice.iter_mut() {
+            *x = Exp1.sample(&mut *rng);
+        }
+    });
+}
+
+// ── argmin (Tier 4): L-BFGS minimisation of 2-D Rosenbrock. ─────────────────────────────────────
+// Returns the number of iterations taken (so the Rust side is observable / not DCE'd).
+// The start point [-1.2, 1.0] and tol_grad = 1e-5 match the Julia probe exactly.
+
+use argmin::core::{CostFunction, Gradient, Executor, State};
+use argmin::solver::quasinewton::LBFGS;
+use argmin::solver::linesearch::MoreThuenteLineSearch;
+
+struct Rosenbrock2D;
+
+impl CostFunction for Rosenbrock2D {
+    type Param = Vec<f64>;
+    type Output = f64;
+    fn cost(&self, p: &Vec<f64>) -> Result<f64, argmin::core::Error> {
+        let x = p[0]; let y = p[1];
+        Ok(100.0 * (y - x * x).powi(2) + (1.0 - x).powi(2))
+    }
+}
+
+impl Gradient for Rosenbrock2D {
+    type Param  = Vec<f64>;
+    type Gradient = Vec<f64>;
+    fn gradient(&self, p: &Vec<f64>) -> Result<Vec<f64>, argmin::core::Error> {
+        let x = p[0]; let y = p[1];
+        Ok(vec![
+            -400.0 * x * (y - x * x) - 2.0 * (1.0 - x),
+            200.0 * (y - x * x),
+        ])
+    }
+}
+
+/// Run L-BFGS on 2-D Rosenbrock from [-1.2, 1.0], `batch` times.
+/// Returns iteration count of the last run cast to c_double.
+/// Writes the final [x, y] of the last run into `out[0..2]`.
+/// Use batch > 1 to amortise fixed overhead and match Julia-side batching.
+#[unsafe(no_mangle)]
+pub extern "C" fn argmin_lbfgs_rosenbrock(out: *mut c_double, batch: usize) -> c_double {
+    let mut last_iters: u64 = 0;
+    let mut last_p = vec![0.0f64, 0.0f64];
+    for _ in 0..batch {
+        let linesearch = MoreThuenteLineSearch::new();
+        let solver: LBFGS<_, Vec<f64>, Vec<f64>, f64> = LBFGS::new(linesearch, 7)
+            .with_tolerance_grad(1e-5).unwrap();
+        let res = Executor::new(Rosenbrock2D, solver)
+            .configure(|state| state.param(vec![-1.2_f64, 1.0]).max_iters(10_000))
+            .run()
+            .unwrap();
+        last_iters = res.state().get_iter();
+        if let Some(p) = res.state().get_best_param() {
+            last_p[0] = p[0]; last_p[1] = p[1];
+        }
+    }
+    let o = unsafe { std::slice::from_raw_parts_mut(out, 2) };
+    o[0] = last_p[0]; o[1] = last_p[1];
+    last_iters as c_double
+}

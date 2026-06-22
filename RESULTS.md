@@ -22,7 +22,9 @@ Date: 2026-06-22.
 | 1 | libm exp, log | Base (openlibm) | 2.0× / 1.3× faster than rust libm | ☑ skip |
 | 2 | glam / nalgebra | StaticArrays.jl | SA beats glam; `SmallMatrix` ties SA on cross/dot | ☑ skip |
 | 3 | ndarray | Base arrays/broadcast/views | Base 1.18× (fused broadcast), 1.40× (strided sum) | ☑ skip |
-| 3 | **faer** | LinearAlgebra → **OpenBLAS/MKL** | Cholesky & QR: faer wins n≥256 | ⚠ **reimplement** |
+| 3 | **faer** | LinearAlgebra → **OpenBLAS/MKL** | faer wins: QR all n, Cholesky/SVD n≥256, LU n≤256 (σ-clean); MKL loses harder | ⚠ **reimplement** |
+| 4 | **rand + rand_distr** | Base `Random` stdlib (Xoshiro256++) | uniform 2.59×, normal 1.46×, exp 1.51× faster than Rust SmallRng; σ-clean (<3% both sides) | ☑ skip |
+| 4 | **argmin** | Optim.jl (LBFGS) | Julia ~19µs vs Rust ~22µs/call (ratio ~1.12–1.19×); Julia σ=16% (GC from Optim allocations) | ◐ inconclusive |
 
 ## The faer finding (the one gap)
 
@@ -32,21 +34,41 @@ wrappers over the **OpenBLAS/MKL C/Fortran binary**. Where faer (pure Rust) beat
 StrictMode kernel test (recursive blocked factorization under
 `@assert_vectorized` / `@unroll` / `@assert_noalloc`).
 
-σ-aware results (in-place `cholesky!`/`lu!`/`qr!`/`svd!`; n = 64, 128, 256, 512), parity = rust/julia:
+Results, **parity = rust/faer ÷ OpenBLAS** (< 0.96 ⇒ faer faster). In-place `cholesky!`/`lu!`/`qr!`/
+`svd!` (allocating); **GC controlled** during timing (`GC.enable(false)` + per-iteration young-gen
+`GC.gc(false)`), which collapsed the earlier 200–320% σ to <13% (mostly <6%) on both sides — the
+dataset is now σ-clean and conclusive. n = 64, 128, 256, 512:
 
-| Factorization | n=64 | n=128 | n=256 | n=512 | Trusted verdict |
-|---------------|------|-------|-------|-------|-----------------|
-| **Cholesky** (σ-clean) | 1.02× | 1.00× | **0.90×** | **0.83×** | faer wins n≥256 (MKL loses harder, 0.64–0.85×) → **reimplement** |
-| **QR** | 0.71×* | 0.82×* | **0.76×** | **0.68×** | faer wins n≥256 (MKL 0.56–0.59×) → **reimplement** |
-| **LU** | 0.88×* | 0.81×* | 0.89×* | **1.05×** | inconclusive; only clean point (n=512) has **OpenBLAS winning** |
-| **SVD** | 1.22× | 1.08× | 0.99× | 0.88×* | ~parity, no firm gap (LAPACK dgesdd competitive) |
+| Factorization | n=64 | n=128 | n=256 | n=512 | Verdict (vs best of OpenBLAS/MKL) |
+|---------------|------|-------|-------|-------|-----------------------------------|
+| **QR**       | **0.66×** | **0.82×** | **0.76×** | **0.66×** | **faer wins at ALL sizes** → reimplement (biggest gap) |
+| **Cholesky** | 1.22× | 0.97× | **0.90×** | **0.82×** | tie ≤128; **faer wins n≥256** → reimplement |
+| **LU**       | **0.90×** | **0.80×** | **0.89×** | 1.03× | **faer wins n≤256**; OpenBLAS wins n=512 (clean crossover) |
+| **SVD**      | 1.12× | 1.09× | **0.95×** | **0.86×** | OpenBLAS good ≤128; **faer wins n≥256** |
 
-`*` = OpenBLAS rel-σ > 15% (untrusted — see note).
+**MKL is throttled on this AMD (Zen5) box — discount it, OpenBLAS is the fair baseline.** MKL came
+out *worse* than OpenBLAS everywhere, which prompted a check: `MKL_VERBOSE` reports the **generic**
+kernel (*"Intel(R) Architecture processors"*, not "AVX2/AVX-512 enabled"), and forcing
+`MKL_ENABLE_INSTRUCTIONS` from AVX512 down to **SSE4_2 changes timing by <3%** — proof MKL runs its
+reference path regardless of ISA (a genuine AVX path would be 2–4× slower at SSE4_2). So MKL's numbers
+reflect Intel's AMD penalty, not MKL's real capability — they are **not** a valid "best BLAS" baseline.
+The known un-cripple methods all fail on **MKL 2025.2**: `MKL_DEBUG_CPU_TYPE=5` (removed after 2020u1),
+`MKL_ENABLE_INSTRUCTIONS` (no-op), and the `fakeintel` `LD_PRELOAD` (`mkl_serv_intel_cpu_true`/
+`mkl_serv_get_cpu_true` are never called → non-interposable cpuid gating).
 
-**Measurement note:** Julia-side σ explodes on `lu!`/`svd!`/`qr!` (workspace/ipiv allocation →
-GC pauses, σ up to 320%), while faer stays tight (Rust allocs don't hit Julia's GC). This asymmetry
-makes small-n LU/SVD medians unreliable here; firm verdicts need LAPACK called with preallocated
-workspace (no GC in the timed region).
+Forcing the **old MKL 2020.0** (via `MKL_jll@2020.0.166`, manually LBT-forwarded — see
+`bench/mkl_amd/check2020.jl`) *does* honour `MKL_DEBUG_CPU_TYPE=5`: it speeds MKL up **1.1–1.5×**
+(cholesky-256 1.50×, qr-256 1.43×, qr-512 1.28×) — directly confirming the AMD penalty. **But** the flag
+only forces **AVX2**, not AVX-512, so even un-crippled MKL 2020 still loses to Zen-native AVX-512
+OpenBLAS (cholesky-512: faer 885µs < OpenBLAS 1078µs < MKL2020-AVX2 1403µs). Investigation in
+`bench/mkl_amd/`. **The faer verdict stands on faer vs OpenBLAS** — the strongest BLAS obtainable on
+this hardware — independent of the MKL crippling.
+
+**Measurement note:** the in-place `!` factorizations still allocate (`ipiv`/`tau`/`work`/the
+factorization object) → with auto-GC this fired full collections mid-run (σ up to 320% on LU/SVD).
+Fix: disable auto-GC and run an explicit **young-generation** `GC.gc(false)` per timed iteration so
+reclamation is deterministic and cheap. faer needs none (Rust allocs don't touch Julia's GC). The
+*next* optimization step — preallocated raw-LAPACK workspace (zero alloc) — is deferred.
 
 ## Notes on the skips
 
@@ -58,9 +80,64 @@ workspace (no GC in the timed region).
 - **SmallMatrix** passes its per-submodule StrictMode audit (`cross/dot/norm/normalize`: typestable +
   noalloc).
 
+## Tier 4 findings (2026-06-22)
+
+### rand + rand_distr: Julia Base dominates (☑ skip)
+
+Probed `Base.Random` stdlib (Xoshiro256++) vs Rust `rand` crate (`SmallRng` = Xoshiro256++) on
+N=1,000,000 element fills.  Both sides use the **same PRNG algorithm family** (Xoshiro256++) for an
+apples-to-apples comparison.  Rust side uses a thread-local RNG (no Mutex overhead).
+
+σ-clean (< 3% both sides), both runs consistent:
+
+| Kernel | Julia median | Rust median | Parity (rust/julia) | Julia σ | Rust σ | Verdict |
+|--------|-------------|-------------|---------------------|---------|--------|---------|
+| `rand_uniform` (uniform [0,1)) | 242 ns | 628 ns | **2.59×** (Julia wins) | 2% | 3% | ☑ skip |
+| `rand_normal` (std. normal) | 1012 ns | 1476 ns | **1.46×** (Julia wins) | 2% | 2% | ☑ skip |
+| `rand_exp` (Exp(1)) | 1053 ns | 1587 ns | **1.51×** (Julia wins) | 2% | 3% | ☑ skip |
+
+**Why Julia wins so decisively on uniform:** Julia's `rand!(rng, A)` is a highly optimized
+SIMD-vectorized fill; Rust's SmallRng loop is scalar.  Julia's ziggurat-based `randn!`/`randexp!`
+also beat Rust's `rand_distr` implementations.
+
+Correctness: distribution sanity checks passed (uniform mean≈0.5, normal mean≈0 var≈1, exp mean≈1).
+Note: streams differ (different seeds) — value equality not tested, only distribution statistics.
+
+### argmin: INCONCLUSIVE (Julia σ too high)
+
+Probed Optim.jl L-BFGS vs Rust argmin 0.11 L-BFGS on 2-D Rosenbrock (`f(x,y) = 100(y-x²)² + (1-x)²`)
+from `[-1.2, 1.0]` to `grad_tol=1e-5`.  Both converge correctly to `[1,1]` (f≈0).
+Both use m=7 L-BFGS history + MoreThuente line search.
+
+Iteration counts are comparable (Julia=35 iters / 51 fevals; Rust=37 iters — ratio 1.06×), so
+wall-clock is not grossly apples-to-oranges.
+
+Batched 100 calls to amortize GC; medians stable run-to-run:
+
+| Contender | Median (batch×100) | Per-call | rel-σ |
+|-----------|-------------------|---------|-------|
+| Optim.jl LBFGS | ~1.95 ms | ~19.5 µs | **16.5%** ← INCONCLUSIVE |
+| rust argmin | ~2.15 ms | ~21.5 µs | 4.8% |
+
+**Why Julia σ is high:** Optim.jl allocates ~11KB per `optimize()` call (line-search history
+vectors, gradient workspace).  100 calls = ~1.1MB allocated per Chairmarks sample, triggering
+periodic GC pauses.  The **distribution is skewed right**: p5–p75 is tight (1.93–1.97ms),
+but p95 jumps to 2.71ms dragging up the std.  The **median is stable** but σ > 15% renders it
+formally INCONCLUSIVE per the σ-discipline.
+
+**Direction:** Julia median ~1.12–1.19× faster than Rust argmin, but not trustworthy.
+**Resolution path:** preallocated workspace API for Optim.jl (doesn't exist), or switch to a
+zero-allocation optimizer (e.g. NLSolversBase with manual workspace) for a σ-clean comparison.
+
+**Note on framing:** There is no Base optimizer — Optim.jl is an ecosystem package.  So even if a
+gap existed (Julia losing), it would not be a "stdlib gap".
+
 ## Open follow-up
 
 Probe **RecursiveFactorization.jl** (pure-Julia recursive LU, known to beat OpenBLAS small-n) and, to
 chase the real gap, prototype a pure-Julia recursive **Cholesky / QR** in a `Factorizations`
 submodule — the definitive test of whether the n≥256 gap is a true pure-Julia gap or only
 stdlib-vs-faer.
+
+For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
+BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.

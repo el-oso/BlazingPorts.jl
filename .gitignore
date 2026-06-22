@@ -13,6 +13,10 @@ node_modules/
 **/target/
 Cargo.lock
 
+# Compiled shared libs (e.g. bench/mkl_amd/fakeintel.so — keep the .c source)
+*.so
+*.so.*
+
 # Generated probe plots (docs/assets/*.png) and capped sample data (bench/results/*.json)
 # are tracked so plots can be regenerated without re-running benchmarks (see Harness.replot).
 

@@ -67,20 +67,34 @@ function sanity_svd(A::Matrix{Float64})
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Build a timed closure over preallocated scratch (no allocation in hot loop)
+# Julia contenders: in-place factorizations (cholesky!/lu!/qr!/svd!). These still
+# allocate (ipiv/tau/work/factorization object) each call — preallocating raw-LAPACK
+# workspace is a deliberate NEXT step. Here we tame the resulting GC noise by running
+# the timed region with auto-GC disabled and an explicit young-gen `GC.gc(false)` per
+# iteration (see probe_one) — only the last generation, not a full collection — so
+# Julia's timing is closer to Rust's. The `Symmetric` wrapper for Cholesky is built
+# ONCE (constructing it inside the loop would allocate a new object each call).
+# Only the factorization is timed — no backsolve (`chol \ x` would also allocate).
 # ─────────────────────────────────────────────────────────────────────────────
 function make_jl_closure(name, ref_mat)
     s = copy(ref_mat)
-    # All four use the IN-PLACE LAPACK wrappers (cholesky!/lu!/qr!/svd!) over the refreshed scratch
-    # `s`, matching faer factoring a freshly-copied Mat each call — apples-to-apples, minimal alloc.
     if name == "cholesky"
-        return @noinline let r=ref_mat, s=s; () -> (copyto!(s, r); cholesky!(Symmetric(s, :L)); s[1]); end
+        sym = Symmetric(s, :L)   # preallocate the wrapper once; it views `s`
+        return @noinline let r = ref_mat, s = s, sym = sym
+            () -> (copyto!(s, r); cholesky!(sym); GC.gc(false); s[1])
+        end
     elseif name == "lu"
-        return @noinline let r=ref_mat, s=s; () -> (copyto!(s, r); lu!(s); s[1]); end
+        return @noinline let r = ref_mat, s = s
+            () -> (copyto!(s, r); lu!(s); GC.gc(false); s[1])
+        end
     elseif name == "qr"
-        return @noinline let r=ref_mat, s=s; () -> (copyto!(s, r); qr!(s); s[1]); end
+        return @noinline let r = ref_mat, s = s
+            () -> (copyto!(s, r); qr!(s); GC.gc(false); s[1])
+        end
     elseif name == "svd"
-        return @noinline let r=ref_mat, s=s; () -> (copyto!(s, r); svd!(s); s[1]); end
+        return @noinline let r = ref_mat, s = s
+            () -> (copyto!(s, r); svd!(s); GC.gc(false); s[1])
+        end
     end
 end
 function make_rust_closure(name, ref_mat)
@@ -95,17 +109,20 @@ end
 function probe_one(name, n; ref_mat, seconds=3.0, with_mkl=false)
     f_jl  = make_jl_closure(name, ref_mat)
     f_rust = make_rust_closure(name, ref_mat)
+    jl_label = with_mkl ? "MKL" : "OpenBLAS"  # backend already swapped by `using MKL` at top level
 
-    labels = ["OpenBLAS", "rust/faer"]
-    fns    = [f_jl, f_rust]
+    # Julia contender under controlled GC: disable auto-GC (no surprise FULL collection mid-run),
+    # the closure itself ends with an explicit young-gen GC.gc(false) each iteration to reclaim the
+    # factorization temporaries deterministically (inside the timed region) → far lower σ. The Rust
+    # contender allocates no Julia memory, so it runs under normal GC.
+    f_jl()  # warm/compile
+    GC.enable(false); GC.gc(false)
+    p_jl = run_probe(jl_label, f_jl; seconds=seconds)
+    GC.enable(true); GC.gc()
 
-    if with_mkl
-        # Re-use same closures — BLAS backend already swapped by `using MKL` at top level
-        # We just re-label the Julia contender
-        labels = ["MKL", "rust/faer"]
-    end
+    p_rust = run_probe("rust/faer", f_rust; seconds=seconds)
 
-    probes = Probe[run_probe(l, f; seconds=seconds) for (l, f) in zip(labels, fns)]
+    probes = Probe[p_jl, p_rust]
     crate_key = "faer_$(name)_$(n)x$(n)$(with_mkl ? "_mkl" : "")"
     report(crate_key, probes; rust_label="rust/faer")
     save_probes(crate_key, probes)

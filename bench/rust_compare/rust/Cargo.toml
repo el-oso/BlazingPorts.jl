@@ -16,6 +16,10 @@ libm = "0.2"             # erf / gamma / exp / log reference kernels (Tier 1, st
 glam = "0.29"            # Vec3/Vec4/Mat4 SIMD game math (Tier 2)
 faer = "0.24"
 ndarray = "0.17"
+rand = { version = "0.9", features = ["small_rng"] }  # Xoshiro256++ SmallRng (Tier 4)
+rand_distr = "0.5"        # StandardNormal, Exp1 samplers (Tier 4)
+argmin = "0.11"           # generic optimizer: L-BFGS (Tier 4)
+argmin-math = { version = "0.5", features = ["vec"] }  # argmin trait impls for Vec<f64>
 
 [profile.release]
 opt-level = 3
