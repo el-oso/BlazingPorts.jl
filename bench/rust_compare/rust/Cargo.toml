@@ -14,6 +14,8 @@ crate-type = ["cdylib"]
 matrixmultiply = "0.3"   # bluss gemm microkernel (Tier 1)
 libm = "0.2"             # erf / gamma / exp / log reference kernels (Tier 1, statrs/libm)
 glam = "0.29"            # Vec3/Vec4/Mat4 SIMD game math (Tier 2)
+faer = "0.24"
+ndarray = "0.17"
 
 [profile.release]
 opt-level = 3

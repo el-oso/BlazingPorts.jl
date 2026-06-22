@@ -13,7 +13,7 @@ node_modules/
 **/target/
 Cargo.lock
 
-# Generated probe plots are kept (docs/assets/*.png) but probe scratch is not
-bench/results/
+# Generated probe plots (docs/assets/*.png) and capped sample data (bench/results/*.json)
+# are tracked so plots can be regenerated without re-running benchmarks (see Harness.replot).
 
 .DS_Store

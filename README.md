@@ -53,6 +53,20 @@ taskset -c 2 julia -t 1 --project=bench bench/probe_smallmatrix.jl
 julia --project=bench bench/strictmode_audit.jl
 ```
 
+### Saved data & re-plotting
+
+Each probe writes its full (capped) sample distribution to `bench/results/<crate>.json` (tracked in
+git). To restyle plots **without re-running benchmarks**:
+
+```julia
+include("bench/harness.jl"); using .Harness
+replot()              # regenerate every plot from cached JSON (violin + box)
+replot(kind = :box)   # box-only variant
+```
+
+Plots are **violin + box** (per-eval time, ns, lower = better) — the full distribution, not just the
+median; statistics use every collected sample while only a ≤2000-point subsample is stored/plotted.
+
 ## No Python
 
 Per the global rule, there is no Python anywhere — the Rust crates are compared via a native cdylib
