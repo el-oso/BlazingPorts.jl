@@ -1,4 +1,18 @@
 [deps]
+AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
 BlazingPorts = "6a76645a-1c79-4c35-96ac-450b50bde595"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
 ReTestItems = "817f1d60-ba6b-4fd5-9520-3cf149f6a823"
+StrictMode = "0e98b4f4-d0e6-42ac-af0a-707c24852f32"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+# StrictMode is unregistered → resolve from the local sibling checkout (so ReTestItems workers and
+# Pkg don't look it up in a registry).
+[sources]
+StrictMode = {path = "../../StrictMode.jl"}
+
+# Per-kernel StrictMode guarantees run in the test suite (mirrors PureFFT's test/strictmode_tests.jl).
+[preferences.StrictMode]
+checks_enabled = true
+analysis = "full"
+fail_mode = "error"

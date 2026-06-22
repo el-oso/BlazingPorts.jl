@@ -18,6 +18,11 @@ function warm()
     SM.dot(a, b); SM.cross(a, b); SM.norm(a); SM.normalize(a); a + b; 2.0 * a
     v = SM.Vec4(1.0, 2.0, 3.0, 4.0)
     m = SM.Mat4(v, v, v, v); m * v; m * m
+    # Factorizations: warm the Cholesky base kernel
+    F = BlazingPorts.Factorizations
+    A = Matrix{Float64}(undef, 16, 16)
+    for j in 1:16, i in 1:16; A[i, j] = (i == j ? 16.0 : 0.25); end
+    F.cholesky_llt!(A)
     return nothing
 end
 warm()
@@ -28,6 +33,7 @@ const TARGETS = [
     (BlazingPorts.SmallMatrix, (:typestable, :noalloc)),
     (BlazingPorts.SpecialFns, (:inlined, :noalloc, :trimsafe)),
     (BlazingPorts.MatrixMultiply, (:vectorized, :noalloc)),
+    (BlazingPorts.Factorizations, (:typestable, :noalloc, :vectorized)),
 ]
 
 total_fail = 0

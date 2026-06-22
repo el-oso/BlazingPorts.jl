@@ -13,18 +13,21 @@ hot paths use Base `@generated`/SIMD, and the StrictMode `audit` / `@assert_*` g
 applied externally in `bench/` and `test/` (StrictMode is a test/bench-only dep).
 
 Submodules (one per crate family):
-- [`MatrixMultiply`](@ref) — optional pure-Julia gemm microkernel (matrixmultiply probe).
-- [`SpecialFns`](@ref)     — optional erf/gamma kernels (libm/statrs probe).
-- [`SmallMatrix`](@ref)    — Vec3/Vec4/Mat4 stack math (glam/nalgebra probe).
+- [`MatrixMultiply`](@ref)  — optional pure-Julia gemm microkernel (matrixmultiply probe).
+- [`SpecialFns`](@ref)      — optional erf/gamma kernels (libm/statrs probe).
+- [`SmallMatrix`](@ref)     — Vec3/Vec4/Mat4 stack math (glam/nalgebra probe).
+- [`Factorizations`](@ref)  — faithful faer Cholesky port (faer probe, Layer B+C).
 """
 module BlazingPorts
 
 include("SmallMatrix.jl")
 include("SpecialFns.jl")
 include("MatrixMultiply.jl")
+include("Factorizations.jl")
 
 using .SmallMatrix
 using .SpecialFns
 using .MatrixMultiply
+using .Factorizations
 
 end # module BlazingPorts
