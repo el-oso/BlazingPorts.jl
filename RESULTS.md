@@ -22,7 +22,7 @@ Date: 2026-06-22.
 | 1 | libm exp, log | Base (openlibm) | 2.0× / 1.3× faster than rust libm | ☑ skip |
 | 2 | glam / nalgebra | StaticArrays.jl | SA beats glam; `SmallMatrix` ties SA on cross/dot | ☑ skip |
 | 3 | ndarray | Base arrays/broadcast/views | Base 1.18× (fused broadcast), 1.40× (strided sum) | ☑ skip |
-| 3 | **faer** | LinearAlgebra → **OpenBLAS/MKL** | faer wins: QR all n, Cholesky/SVD n≥256, LU n≤256 (σ-clean); MKL loses harder | ⚠ **reimplement** |
+| 3 | **faer** | LinearAlgebra → **OpenBLAS/MKL** | faer wins QR (all n), Cholesky/SVD (n≥256); LU covered by pure-Julia RecursiveFactorization.jl (wins n≤128) | ⚠ **reimplement Cholesky/QR** |
 | 4 | **rand + rand_distr** | Base `Random` stdlib (Xoshiro256++) | uniform 2.59×, normal 1.46×, exp 1.51× faster than Rust SmallRng; σ-clean (<3% both sides) | ☑ skip |
 | 4 | **argmin** | Optim.jl (LBFGS) | Optim.jl 23.4µs vs argmin 25.0µs/call (1.07×, σ-clean via batch+GC-control); iters comparable | ☑ skip |
 
@@ -43,8 +43,27 @@ dataset is now σ-clean and conclusive. n = 64, 128, 256, 512:
 |---------------|------|-------|-------|-------|-----------------------------------|
 | **QR**       | **0.66×** | **0.82×** | **0.76×** | **0.66×** | **faer wins at ALL sizes** → reimplement (biggest gap) |
 | **Cholesky** | 1.22× | 0.97× | **0.90×** | **0.82×** | tie ≤128; **faer wins n≥256** → reimplement |
-| **LU**       | **0.90×** | **0.80×** | **0.89×** | 1.03× | **faer wins n≤256**; OpenBLAS wins n=512 (clean crossover) |
+| **LU**       | **0.90×** | **0.80×** | **0.89×** | 1.03× | vs OpenBLAS faer wins n≤256 — **but pure-Julia RecursiveFactorization.jl already wins n≤128** (see below), so LU is NOT a reimplementation target |
 | **SVD**      | 1.12× | 1.09× | **0.95×** | **0.86×** | OpenBLAS good ≤128; **faer wins n≥256** |
+
+### LU follow-up: RecursiveFactorization.jl (pure-Julia) already matches/beats faer at small n
+
+faer doesn't beat *Julia* code — it beats LAPACK. The pure-Julia recursive LU
+(`RecursiveFactorization.jl`, used by LinearSolve/DiffEq) is the real Julia answer. Head-to-head LU
+(parity = faer/contender; >1 ⇒ contender faster than faer; σ-clean except OpenBLAS small-n 11–16%):
+
+| n | OpenBLAS | RecursiveFactorization | faer | takeaway |
+|---|----------|------------------------|------|----------|
+| 64  | 12934 ns | **6913 ns** | 11392 ns | **RF beats faer 1.65×** (and OpenBLAS) — gap closed in pure Julia |
+| 128 | 60864 ns | **51126 ns** | 50014 ns | RF ≈ faer (0.98×), both beat OpenBLAS |
+| 256 | 337524 ns | 529294 ns | **298531 ns** | RF falls off (0.56×); faer wins, narrow gap with no good pure-Julia answer |
+| 512 | **2107972 ns** | 3913484 ns | 2183904 ns | OpenBLAS ties faer (1.04×); RF poor at large n |
+
+**LU verdict:** pure Julia is already competitive — **RecursiveFactorization wins n≤128** (it's tuned
+for the small-matrix regime), OpenBLAS handles n≥512. The only uncovered band is **n≈256**, too narrow
+to justify a reimplementation. Notably RF beating faer 1.65× at n=64 *demonstrates pure Julia can beat
+a Rust LA kernel at small sizes* — encouraging for the Cholesky/QR prototype. **Cholesky & QR remain
+the genuine targets** (no pure-Julia recursive equivalent; faer wins n≥256).
 
 **MKL is throttled on this AMD (Zen5) box — discount it, OpenBLAS is the fair baseline.** MKL came
 out *worse* than OpenBLAS everywhere, which prompted a check: `MKL_VERBOSE` reports the **generic**
@@ -123,10 +142,20 @@ ecosystem win, not a stdlib one. Verdict: document-skip (Julia good enough).
 
 ## Open follow-up
 
-Probe **RecursiveFactorization.jl** (pure-Julia recursive LU, known to beat OpenBLAS small-n) and, to
-chase the real gap, prototype a pure-Julia recursive **Cholesky / QR** in a `Factorizations`
-submodule — the definitive test of whether the n≥256 gap is a true pure-Julia gap or only
-stdlib-vs-faer.
+✅ **RecursiveFactorization.jl probed** (see LU follow-up above): pure-Julia LU already beats faer at
+n≤128 (1.65× at n=64) and ties at 128, but degrades at n≥256 → LU is *not* a reimplementation target.
+
+**FastCholesky.jl checked (2026-06-22) — not the Cholesky analogue of RF.jl.** It only custom-codes
+**n<20** (`src/FastCholesky.jl:102`: `n < 20 ? _fastcholesky! : cholesky!(Hermitian)`); for n≥20 it's
+LAPACK + a Hermitian/symmetrize layer, so it's *slower* than bare OpenBLAS and loses to faer (n=256:
+FastCholesky 0.76× faer, vs OpenBLAS 0.90×). So Cholesky has **no** pure-Julia medium-n answer — the
+gap is real.
+
+➡ **Next: prototype a pure-Julia recursive blocked Cholesky / QR** in a `Factorizations` submodule,
+gated by `@assert_vectorized`/`@unroll`/`@assert_noalloc` — these have no pure-Julia recursive
+equivalent and faer wins them at n≥256. RF beating faer at small-n LU shows pure Julia *can* win at
+these sizes; the open question is whether StrictMode's levers reach faer for Cholesky/QR or re-expose
+the instruction-scheduling ceiling (`StrictMode docs/src/rust_gaps.md`).
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
