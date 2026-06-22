@@ -111,28 +111,66 @@ function _trsm_right_lower!(p00::Ptr{Float64}, p10::Ptr{Float64}, bs::Int, m::In
     return nothing
 end
 
-# ── trailing symmetric rank-bs update: A11 (m×m, lower) −= L10·L10ᵀ. Vectorized over rows i. ──
+# ── trailing symmetric rank-bs update: A11 (m×m) −= L10·L10ᵀ. Register-blocked NC columns × W rows:
+#    each loaded L10[i,c] vector is reused across NC column accumulators (turns the memory-bound naive
+#    version into a compute-bound microkernel). Computes the full m×m (upper is overwritten but never
+#    read — the factorization only touches the lower triangle); per-lower-element result is unchanged. ──
+const NC = 4
+
+@inline function _syrk_panel!(p11, p10, j::Int, m::Int, bs::Int, ld::Int)
+    # one column j of A11: A11[i,j] -= Σ_c L10[j,c]·L10[i,c]
+    i = 1
+    @inbounds while i + W - 1 <= m
+        b = _vptr(p11, i, j, ld); a = vload(Vec{W,Float64}, b)
+        for c in 1:bs
+            a = muladd(Vec{W,Float64}(-unsafe_load(p10, _lidx(j, c, ld))),
+                vload(Vec{W,Float64}, _vptr(p10, i, c, ld)), a)
+        end
+        vstore(a, b); i += W
+    end
+    @inbounds while i <= m
+        s = unsafe_load(p11, _lidx(i, j, ld))
+        for c in 1:bs
+            s = muladd(-unsafe_load(p10, _lidx(j, c, ld)), unsafe_load(p10, _lidx(i, c, ld)), s)
+        end
+        unsafe_store!(p11, s, _lidx(i, j, ld)); i += 1
+    end
+end
+
 function _syrk_lower!(p11::Ptr{Float64}, p10::Ptr{Float64}, m::Int, bs::Int, ld::Int)
-    @inbounds for j in 1:m
-        i = j
+    j = 1
+    @inbounds while j + NC - 1 <= m
+        i = 1
         while i + W - 1 <= m
-            base = _vptr(p11, i, j, ld)
-            acc = vload(Vec{W,Float64}, base)
+            b0 = _vptr(p11, i, j, ld);     a0 = vload(Vec{W,Float64}, b0)
+            b1 = _vptr(p11, i, j + 1, ld); a1 = vload(Vec{W,Float64}, b1)
+            b2 = _vptr(p11, i, j + 2, ld); a2 = vload(Vec{W,Float64}, b2)
+            b3 = _vptr(p11, i, j + 3, ld); a3 = vload(Vec{W,Float64}, b3)
             for c in 1:bs
-                njc = -unsafe_load(p10, _lidx(j, c, ld))
-                acc = muladd(Vec{W,Float64}(njc), vload(Vec{W,Float64}, _vptr(p10, i, c, ld)), acc)
+                lic = vload(Vec{W,Float64}, _vptr(p10, i, c, ld))   # reused across the 4 columns
+                a0 = muladd(Vec{W,Float64}(-unsafe_load(p10, _lidx(j, c, ld))), lic, a0)
+                a1 = muladd(Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 1, c, ld))), lic, a1)
+                a2 = muladd(Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 2, c, ld))), lic, a2)
+                a3 = muladd(Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 3, c, ld))), lic, a3)
             end
-            vstore(acc, base)
+            vstore(a0, b0); vstore(a1, b1); vstore(a2, b2); vstore(a3, b3)
             i += W
         end
-        while i <= m
-            s = unsafe_load(p11, _lidx(i, j, ld))
-            for c in 1:bs
-                s = muladd(-unsafe_load(p10, _lidx(j, c, ld)), unsafe_load(p10, _lidx(i, c, ld)), s)
+        while i <= m  # row tail for the 4-column block
+            for dj in 0:NC-1
+                s = unsafe_load(p11, _lidx(i, j + dj, ld))
+                for c in 1:bs
+                    s = muladd(-unsafe_load(p10, _lidx(j + dj, c, ld)), unsafe_load(p10, _lidx(i, c, ld)), s)
+                end
+                unsafe_store!(p11, s, _lidx(i, j + dj, ld))
             end
-            unsafe_store!(p11, s, _lidx(i, j, ld))
             i += 1
         end
+        j += NC
+    end
+    while j <= m   # remaining (<NC) columns
+        _syrk_panel!(p11, p10, j, m, bs, ld)
+        j += 1
     end
     return nothing
 end

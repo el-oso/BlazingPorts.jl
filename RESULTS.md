@@ -180,9 +180,35 @@ the **instruction-scheduling / microkernel ceiling** (`StrictMode docs/src/rust_
 reaching faer needs a tiled-microkernel guarantee/lever beyond vectorized+noalloc (or it's explicitly
 out of StrictMode's scope, per the ceiling doc).
 
-➡ **Next iteration**: tile the trailing update — either the plan's `@turbo` gemm for `syrk` (auto
-cache/register blocking; bit-exactness already relaxed at block level) or a hand-tiled `SIMD.jl`
-microkernel. Then re-probe n≥256. (QR — Layer D — follows once Cholesky reaches parity.)
+### Trailing-update tiling — two paths tried (parity vs faer, single-threaded)
+
+Both replace the naive `syrk`. **A** = `@turbo` gemm (LoopVectorization, bench-only); **B** = hand-tiled
+`SIMD.jl` register-blocked (NC=4 cols × W rows, in `src`). Both compute the full m×m (2× flops vs faer's
+triangular).
+
+| n | naive | **B: hand-tiled** | **A: @turbo** | faer | OpenBLAS |
+|---|-------|-------------------|---------------|------|----------|
+| 64  | 1.54× | 1.58× | 1.58× | — (we win) | 1.26× |
+| 128 | 0.72× | **1.07×** | 1.05× | (parity) | 1.03× |
+| 256 | 0.24× | 0.43× | 0.47× | (faer wins) | 0.90× |
+| 512 | 0.12× | 0.24× | 0.33× | (faer wins) | 0.83× |
+
+**Learnings (from running both):**
+1. **Pure-Julia base kernel beats faer** (n≤64) and both tiled paths **reach/beat faer parity at n≤128**
+   (hand-tiled 1.07×). So pure Julia is competitive up to L2-ish sizes.
+2. Both tiling paths ~**2× the naive** at n=256; register blocking (reusing each `L10[i,c]` load across 4
+   column accumulators) is what turns the memory-bound naive into compute-bound.
+3. At **n≥256 both still trail faer ~2×**, and **`@turbo` > hand-tiled at n=512** (0.33× vs 0.24×) —
+   `@turbo` adds multi-level cache blocking my hand kernel lacks (only register + L1). The residual gap is
+   (a) full vs **triangular** syrk (2× flops) and (b) **L2/L3 cache blocking** + a packed microkernel,
+   which faer/OpenBLAS have and we don't.
+4. **StrictMode verdict reinforced**: every variant (naive, hand-tiled, @turbo) passes
+   `@assert_vectorized`+`@assert_noalloc` identically, yet they span **0.12×→0.47×** at n=256 — the
+   guarantees cannot see blocking quality. The missing lever is a **cache/register-tiling guarantee**.
+
+➡ **To actually reach faer at n≥256**: triangular syrk (halve flops) + L2 cache blocking of the `c`
+panel + a packed register microkernel (the OpenBLAS/faer recipe). Or accept that for ≤128 pure Julia is
+at parity and stop. (QR — Layer D — follows.)
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
