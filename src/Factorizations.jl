@@ -83,30 +83,94 @@ function _chol_base!(p::Ptr{Float64}, n::Int, ld::Int)
 end
 
 # ── panel solve: L10 (m×bs) from L10·L00ᵀ = A10, L00 lower (bs×bs). In place on the A10 block. ──
-# Column c of L10: L10[:,c] = (A10[:,c] − Σ_{k<c} L00[c,k]·L10[:,k]) · (1/L00[c,c]). Vectorized over rows.
+# Column c: L10[:,c] = (A10[:,c] − Σ_{k<c} L00[c,k]·L10[:,k]) · (1/L00[c,c]). Register-blocked in NB-column
+# panels: contributions from already-solved columns (k < c0) are applied as a register-blocked gemm (each
+# A10[i,k] load reused across NB output columns), then a tiny within-panel triangular solve handles the
+# k∈[c0,c) coupling. The split keeps ascending-k FMA order with exact intermediate store/reload, so the
+# result is **bit-identical** to the unblocked solve. Vectorized over rows.
+const NB_TRSM = 4
+
+@inline function _trsm_gemm_col!(p00, p10, cc::Int, c0::Int, m::Int, ld::Int)
+    i = 1                                  # A10[:,cc] -= Σ_{k<c0} L00[cc,k]·A10[:,k]
+    @inbounds while i + W - 1 <= m
+        o = _vptr(p10, i, cc, ld); a = vload(Vec{W,Float64}, o)
+        for k in 1:c0-1
+            a = muladd(Vec{W,Float64}(-unsafe_load(p00, _lidx(cc, k, ld))),
+                vload(Vec{W,Float64}, _vptr(p10, i, k, ld)), a)
+        end
+        vstore(a, o); i += W
+    end
+    @inbounds while i <= m
+        s = unsafe_load(p10, _lidx(i, cc, ld))
+        for k in 1:c0-1
+            s = muladd(-unsafe_load(p00, _lidx(cc, k, ld)), unsafe_load(p10, _lidx(i, k, ld)), s)
+        end
+        unsafe_store!(p10, s, _lidx(i, cc, ld)); i += 1
+    end
+end
+
 function _trsm_right_lower!(p00::Ptr{Float64}, p10::Ptr{Float64}, bs::Int, m::Int, ld::Int)
-    @inbounds for c in 1:bs
-        invc = 1.0 / unsafe_load(p00, _lidx(c, c, ld))
-        vinv = Vec{W,Float64}(invc)
-        i = 1
-        while i + W - 1 <= m
-            base = _vptr(p10, i, c, ld)
-            acc = vload(Vec{W,Float64}, base)
-            for k in 1:c-1
-                nck = -unsafe_load(p00, _lidx(c, k, ld))
-                acc = muladd(Vec{W,Float64}(nck), vload(Vec{W,Float64}, _vptr(p10, i, k, ld)), acc)
+    c0 = 1
+    @inbounds while c0 <= bs
+        nb = min(NB_TRSM, bs - c0 + 1)
+        # (1) gemm update of the panel by columns k < c0
+        if c0 > 1
+            if nb == NB_TRSM
+                i = 1
+                while i + W - 1 <= m
+                    o0 = _vptr(p10, i, c0, ld);     a0 = vload(Vec{W,Float64}, o0)
+                    o1 = _vptr(p10, i, c0 + 1, ld); a1 = vload(Vec{W,Float64}, o1)
+                    o2 = _vptr(p10, i, c0 + 2, ld); a2 = vload(Vec{W,Float64}, o2)
+                    o3 = _vptr(p10, i, c0 + 3, ld); a3 = vload(Vec{W,Float64}, o3)
+                    for k in 1:c0-1
+                        vk = vload(Vec{W,Float64}, _vptr(p10, i, k, ld))   # reused across 4 output cols
+                        a0 = muladd(Vec{W,Float64}(-unsafe_load(p00, _lidx(c0, k, ld))), vk, a0)
+                        a1 = muladd(Vec{W,Float64}(-unsafe_load(p00, _lidx(c0 + 1, k, ld))), vk, a1)
+                        a2 = muladd(Vec{W,Float64}(-unsafe_load(p00, _lidx(c0 + 2, k, ld))), vk, a2)
+                        a3 = muladd(Vec{W,Float64}(-unsafe_load(p00, _lidx(c0 + 3, k, ld))), vk, a3)
+                    end
+                    vstore(a0, o0); vstore(a1, o1); vstore(a2, o2); vstore(a3, o3)
+                    i += W
+                end
+                while i <= m
+                    for dj in 0:NB_TRSM-1
+                        cc = c0 + dj; s = unsafe_load(p10, _lidx(i, cc, ld))
+                        for k in 1:c0-1
+                            s = muladd(-unsafe_load(p00, _lidx(cc, k, ld)), unsafe_load(p10, _lidx(i, k, ld)), s)
+                        end
+                        unsafe_store!(p10, s, _lidx(i, cc, ld))
+                    end
+                    i += 1
+                end
+            else
+                for dj in 0:nb-1
+                    _trsm_gemm_col!(p00, p10, c0 + dj, c0, m, ld)
+                end
             end
-            vstore(acc * vinv, base)
-            i += W
         end
-        while i <= m
-            s = unsafe_load(p10, _lidx(i, c, ld))
-            for k in 1:c-1
-                s = muladd(-unsafe_load(p00, _lidx(c, k, ld)), unsafe_load(p10, _lidx(i, k, ld)), s)
+        # (2) within-panel triangular solve (k ∈ [c0, c)) + scale
+        for dj in 0:nb-1
+            c = c0 + dj
+            invc = 1.0 / unsafe_load(p00, _lidx(c, c, ld))
+            vinv = Vec{W,Float64}(invc)
+            i = 1
+            while i + W - 1 <= m
+                o = _vptr(p10, i, c, ld); a = vload(Vec{W,Float64}, o)
+                for k in c0:c-1
+                    a = muladd(Vec{W,Float64}(-unsafe_load(p00, _lidx(c, k, ld))),
+                        vload(Vec{W,Float64}, _vptr(p10, i, k, ld)), a)
+                end
+                vstore(a * vinv, o); i += W
             end
-            unsafe_store!(p10, s * invc, _lidx(i, c, ld))
-            i += 1
+            while i <= m
+                s = unsafe_load(p10, _lidx(i, c, ld))
+                for k in c0:c-1
+                    s = muladd(-unsafe_load(p00, _lidx(c, k, ld)), unsafe_load(p10, _lidx(i, k, ld)), s)
+                end
+                unsafe_store!(p10, s * invc, _lidx(i, c, ld)); i += 1
+            end
         end
+        c0 += NB_TRSM
     end
     return nothing
 end

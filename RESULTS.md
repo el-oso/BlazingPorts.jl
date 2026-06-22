@@ -232,9 +232,36 @@ Octavian/BLIS-scale effort, not a one-kernel fix. **StrictMode finding, hardened
 0.22×→0.50× at n=256 — the missing signal is *pipeline-level* blocking, which no per-call guarantee
 (and no single tuned kernel) captures. (See `StrictMode.jl/FEEDBACK.md` F10.)
 
-➡ **Options**: (a) accept parity-through-128 and stop; (b) optimize the next bottleneck (register-block
-the `trsm`) and re-measure; (c) full BLIS-style packed pipeline to chase faer at n≥256. (QR — Layer D —
-is independent and follows whichever way.)
+### Register-blocking the `trsm` — big lift (and the StrictMode feedback loop closes)
+
+The panel `trsm` was the next bottleneck. Blocked it the same way (NB=4 column panels: contributions from
+columns k<c0 become a register-blocked gemm, then a tiny within-panel triangular solve) — and because the
+ascending-k FMA order with exact intermediate store/reload is preserved, it's **bit-identical** to the
+unblocked solve (recon unchanged). Big speedup, especially at n=256:
+
+| n | before (naive trsm) | **after (reg-blocked trsm)** | faer |
+|---|---------------------|------------------------------|------|
+| 64  | 1.54× | **1.56×** | (we win) |
+| 128 | 1.08× | **1.18×** (beats faer) | parity |
+| 256 | 0.45× | **0.71×** | (faer wins) |
+| 512 | 0.24× | **0.32×** | (faer wins) |
+
+**StrictMode loop closed — the F10 lever now exists and works.** The parallel StrictMode work shipped
+**`kernel_report`** (arithmetic intensity = FP-vector-ops : memory-vector-ops from the LLVM IR). Run on
+our kernels it correctly ranks them — the thing `@assert_vectorized` couldn't see:
+
+| kernel (all pass `@assert_vectorized`) | `kernel_report` intensity | measured |
+|----------------------------------------|---------------------------|----------|
+| `_syrk_panel!` (naive 1-col)           | **0.82** (memory-bound)   | the 0.24× path |
+| `_trsm_right_lower!` (reg-blocked)     | 1.08                      | |
+| `_syrk_lower!` (reg-blocked tile)      | **1.61** (balanced)       | the 0.71× path |
+| `_chol_base!` (L1-resident)            | 0.77 (but wins ≤64 — cache-resident, intensity matters less) |
+
+So StrictMode now *guides* the optimization: it flags trsm (1.08) and syrk (1.61) as "more blocking may
+help" — the next levers (MR=2 tiles, L2 cache blocking) to push n≥256 toward faer.
+
+➡ **Next**, guided by `kernel_report`: raise syrk/trsm intensity (MR=2 register tiles + L2 cache
+blocking) toward faer at n≥256. (QR — Layer D — independent, follows.)
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
