@@ -24,7 +24,7 @@ Date: 2026-06-22.
 | 3 | ndarray | Base arrays/broadcast/views | Base 1.18× (fused broadcast), 1.40× (strided sum) | ☑ skip |
 | 3 | **faer** | LinearAlgebra → **OpenBLAS/MKL** | faer wins: QR all n, Cholesky/SVD n≥256, LU n≤256 (σ-clean); MKL loses harder | ⚠ **reimplement** |
 | 4 | **rand + rand_distr** | Base `Random` stdlib (Xoshiro256++) | uniform 2.59×, normal 1.46×, exp 1.51× faster than Rust SmallRng; σ-clean (<3% both sides) | ☑ skip |
-| 4 | **argmin** | Optim.jl (LBFGS) | Julia ~19µs vs Rust ~22µs/call (ratio ~1.12–1.19×); Julia σ=16% (GC from Optim allocations) | ◐ inconclusive |
+| 4 | **argmin** | Optim.jl (LBFGS) | Optim.jl 23.4µs vs argmin 25.0µs/call (1.07×, σ-clean via batch+GC-control); iters comparable | ☑ skip |
 
 ## The faer finding (the one gap)
 
@@ -103,34 +103,23 @@ also beat Rust's `rand_distr` implementations.
 Correctness: distribution sanity checks passed (uniform mean≈0.5, normal mean≈0 var≈1, exp mean≈1).
 Note: streams differ (different seeds) — value equality not tested, only distribution statistics.
 
-### argmin: INCONCLUSIVE (Julia σ too high)
+### argmin: Optim.jl ties/beats it (☑ skip — now σ-clean)
 
 Probed Optim.jl L-BFGS vs Rust argmin 0.11 L-BFGS on 2-D Rosenbrock (`f(x,y) = 100(y-x²)² + (1-x)²`)
-from `[-1.2, 1.0]` to `grad_tol=1e-5`.  Both converge correctly to `[1,1]` (f≈0).
-Both use m=7 L-BFGS history + MoreThuente line search.
+from `[-1.2, 1.0]` to `grad_tol=1e-5`. Both converge to `[1,1]` (f≈0); iteration counts comparable
+(Julia 35 iters / 51 fevals; Rust 37 — ratio 1.06×), so wall-clock is apples-to-apples.
 
-Iteration counts are comparable (Julia=35 iters / 51 fevals; Rust=37 iters — ratio 1.06×), so
-wall-clock is not grossly apples-to-oranges.
+The earlier inconclusive σ (16.5%, from Optim.jl's ~11KB/call allocations) is **resolved** with the
+**batch + GC-control combo**: 100 calls/sample, auto-GC disabled, one young-gen `GC.gc(false)` per
+batch (a single 22µs call is too small for per-call `GC.gc(false)` — its overhead dominated, σ 29%).
 
-Batched 100 calls to amortize GC; medians stable run-to-run:
+| Contender | Per-call median | rel-σ | Parity (rust/julia) | Verdict |
+|-----------|-----------------|-------|---------------------|---------|
+| Optim.jl LBFGS | 23.4 µs | **3.9%** | **1.07×** (Julia faster) | ☑ skip |
+| rust argmin | 25.0 µs | 6.5% | — | — |
 
-| Contender | Median (batch×100) | Per-call | rel-σ |
-|-----------|-------------------|---------|-------|
-| Optim.jl LBFGS | ~1.95 ms | ~19.5 µs | **16.5%** ← INCONCLUSIVE |
-| rust argmin | ~2.15 ms | ~21.5 µs | 4.8% |
-
-**Why Julia σ is high:** Optim.jl allocates ~11KB per `optimize()` call (line-search history
-vectors, gradient workspace).  100 calls = ~1.1MB allocated per Chairmarks sample, triggering
-periodic GC pauses.  The **distribution is skewed right**: p5–p75 is tight (1.93–1.97ms),
-but p95 jumps to 2.71ms dragging up the std.  The **median is stable** but σ > 15% renders it
-formally INCONCLUSIVE per the σ-discipline.
-
-**Direction:** Julia median ~1.12–1.19× faster than Rust argmin, but not trustworthy.
-**Resolution path:** preallocated workspace API for Optim.jl (doesn't exist), or switch to a
-zero-allocation optimizer (e.g. NLSolversBase with manual workspace) for a σ-clean comparison.
-
-**Note on framing:** There is no Base optimizer — Optim.jl is an ecosystem package.  So even if a
-gap existed (Julia losing), it would not be a "stdlib gap".
+**Note on framing:** there is no Base optimizer — Optim.jl is an ecosystem package — so this is an
+ecosystem win, not a stdlib one. Verdict: document-skip (Julia good enough).
 
 ## Open follow-up
 

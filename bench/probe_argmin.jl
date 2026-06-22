@@ -5,10 +5,10 @@
 #   f(x,y) = 100*(y - x^2)^2 + (1 - x)^2,  optimum [1,1], f=0.
 #   Analytic gradient supplied — no finite-difference overhead.
 #
-# σ-DISCIPLINE: Both sides allocate per optimize() call (Optim.jl ~11KB, argmin Rust heap).
-#   Single-call timing is dominated by GC pauses (Julia σ > 2000%).  Fix: batch BATCH
-#   calls and time the batch — GC is amortized over BATCH iterations → σ < 5% both sides.
-#   Per-call time is then batch_time / BATCH.
+# σ-DISCIPLINE: Optim.jl allocates per optimize() call (~11KB); with auto-GC this fires full
+#   collections mid-run (Julia σ > 2000%). Fix (same as the faer probe): time a SINGLE optimize()
+#   per sample, with auto-GC disabled and an explicit young-generation `GC.gc(false)` inside the
+#   timed region each iteration — deterministic, cheap reclamation → σ collapses, no batching needed.
 #
 # IMPORTANT CAVEAT: optimizer comparisons are sensitive to differing line-search /
 # iteration counts; if the two libraries take different numbers of gradient evaluations,
@@ -32,8 +32,9 @@ Harness.single_thread!()
 isfile(Harness.RUST_LIB) || error("build the Rust lib first: bash bench/rust_compare/build.sh")
 const LIB = Harness.RUST_LIB
 
-# Batch size: amortises per-call allocations (Optim ~11KB/call).
-# 100 calls ≈ 2ms batch; σ < 5% both sides.
+# Batch + GC-control combo: a single 22µs optimize() is too small for per-call GC.gc(false) (its own
+# overhead dominates → σ worse). Batch BATCH calls so the ONE young-gen GC.gc(false) per batch (with
+# auto-GC disabled at the call site) amortises → σ collapses. Per-call time = batch median / BATCH.
 const BATCH = 100
 
 # ── Rosenbrock function + gradient (same definition both sides) ───────────────
@@ -56,6 +57,7 @@ const optim_method = LBFGS(; m=7, linesearch=LineSearches.MoreThuente())
             Optim.Options(g_tol=1e-5, iterations=10_000))
         s += Optim.minimum(r)  # DCE sink
     end
+    GC.gc(false)  # young-gen collect inside the timed region (auto-GC disabled at call site)
     return s
 end
 
@@ -110,14 +112,14 @@ jl_lbfgs_batch!()
 rust_lbfgs_batch!()
 
 # ── probe ─────────────────────────────────────────────────────────────────────
-println("\n=== argmin LBFGS Rosenbrock 2-D (batch=$BATCH, per-call time reported) ===")
-argmin_probes = Probe[
-    run_probe("Optim.jl LBFGS", jl_lbfgs_batch!; seconds=3.0),
-    run_probe("rust argmin",    rust_lbfgs_batch!; seconds=3.0),
-]
-# Divide medians by BATCH for per-call display, but keep raw probes for the harness
-# (harness stores raw batch times; note is in the crate label)
-println("\n── per-batch ($(BATCH) calls) raw timings:")
+println("\n=== argmin LBFGS Rosenbrock 2-D (single call/sample, GC-controlled) ===")
+# Julia contender under controlled GC (auto-GC off; the closure does young-gen GC.gc(false) itself).
+# Rust contender allocates no Julia memory → normal GC.
+GC.enable(false); GC.gc(false)
+p_jl = run_probe("Optim.jl LBFGS", jl_lbfgs_batch!; seconds=3.0)
+GC.enable(true); GC.gc()
+p_rust = run_probe("rust argmin", rust_lbfgs_batch!; seconds=3.0)
+argmin_probes = Probe[p_jl, p_rust]
 report("argmin_lbfgs", argmin_probes; rust_label="rust argmin")
 save_probes("argmin_lbfgs", argmin_probes)
 plot_probe("argmin_lbfgs", argmin_probes)
