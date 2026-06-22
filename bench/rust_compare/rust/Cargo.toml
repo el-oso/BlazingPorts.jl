@@ -11,6 +11,10 @@ crate-type = ["cdylib"]
 name = "cholesky_verify"
 path = "src/bin/cholesky_verify.rs"
 
+[[bin]]
+name = "qr_verify"
+path = "src/bin/qr_verify.rs"
+
 # C-ABI shims so Julia can ccall the real Rust crates and benchmark Rust-vs-Julia in the SAME
 # process (same thermal/frequency state, interleaved per size) — the only reliable parity probe.
 # All probes are SINGLE-THREADED: build/run with RAYON_NUM_THREADS=1; no crate here enables threads.

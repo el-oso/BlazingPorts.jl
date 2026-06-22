@@ -55,6 +55,71 @@
     end
 end
 
+@testitem "qr_golden" tags = [:qr] begin
+    # Layer D-A: validates the QR golden harness WITHOUT any Julia QR implementation.
+    # Reconstruction: apply Householder reflectors to R and verify Q*R ≈ A.
+    #
+    # faer's convention: H_k = I − v_k v_kᵀ / τ_k  (divides by τ_k, NOT multiplies).
+    # τ_k lives at T[k%block_size + 1, k] (1-based; diagonal of each bs×bs T-block).
+    # τ_k = Inf ⟹ H_k = I (trivial reflector, skip).
+    # v_k: leading 1 is implicit (not stored); essential part = QR[k+1:n, k].
+    # Q = H_1 H_2 ⋯ H_n;  we build Q by applying each H_k to the identity from the left.
+
+    using LinearAlgebra: triu, I
+    include(joinpath(@__DIR__, "golden.jl"))
+
+    golden = load_qr_golden()
+    @test !isempty(golden)
+
+    expected_sizes = Set([1, 2, 3, 4, 8, 16, 32, 48, 64, 96, 128, 256, 512])
+    @test Set(keys(golden)) == expected_sizes
+
+    for n in sort(collect(keys(golden)))
+        A  = golden[n].A
+        QR = golden[n].QR
+        T  = golden[n].T
+        bs = golden[n].block_size
+
+        @test size(A)  == (n, n)
+        @test size(QR) == (n, n)
+        @test size(T)  == (bs, n)
+
+        # Extract R: upper triangle of QR (including diagonal).
+        R = triu(QR)
+
+        # Reconstruct Q = H_1 H_2 ⋯ H_n by accumulating into an n×n identity.
+        # Each H_k: Q ← Q * H_k  (applying from the right to the accumulated rows of Q)
+        # Equivalently, build Q column by column: start with I, apply H_k from the left.
+        Q = Matrix{Float64}(I, n, n)
+        for k in 1:n
+            # τ_k is on the diagonal of the k-th T-block: row = (k-1) % bs, col = k (1-based).
+            τ = T[(k - 1) % bs + 1, k]
+            isinf(τ) && continue   # identity reflector — skip
+
+            # Build v_k: [1; essential part from QR below diagonal].
+            v = Vector{Float64}(undef, n - k + 1)
+            v[1] = 1.0
+            for i in 2:(n - k + 1)
+                v[i] = QR[k + i - 1, k]
+            end
+
+            # Apply H_k from the right to Q: Q ← Q * H_k = Q − (Q v) vᵀ / τ
+            # (Q v) is an n-vector; outer product with vᵀ gives n×(n-k+1) update.
+            Qv = Q[:, k:n] * v          # n-vector: Q[:,k:n]*v
+            Q[:, k:n] .-= (Qv * v') ./ τ   # n×(n-k+1) rank-1 update
+        end
+
+        # Q * R must reproduce A (rtol 1e-9).
+        recon = Q * R
+        ok = isapprox(recon, A; rtol=1e-9)
+        @test ok
+        if !ok
+            err = maximum(abs, recon .- A) / maximum(abs, A)
+            @warn "QR reconstruction failed n=$n relerr=$err"
+        end
+    end
+end
+
 @testitem "factorizations_strictmode" tags = [:factorizations] begin
     # StrictMode guarantees — the campaign's headline experiment. The full driver `cholesky_llt!` is
     # type-stable and allocation-free; the SIMD lives in the three pointer kernels (the wrapper itself

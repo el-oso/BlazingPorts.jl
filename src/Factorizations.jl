@@ -337,4 +337,20 @@ function cholesky_llt!(A::AbstractMatrix{Float64})
     end
 end
 
+
+# ── QR Factorization — Layer D (planned) ────────────────────────────────────────────────────────
+#
+# Faithful pure-Julia port of faer 0.24.1 Householder QR (no pivoting).
+# Convention: H_k = I − v_k v_kᵀ / τ_k  (divides by τ, matching faer's `make_householder_in_place`).
+# τ_k = Inf encodes a trivial (identity) reflector; v_k has implicit leading 1 at index k.
+#
+# Planned layers (Layer D):
+#   D-A  golden harness only (done: bench/rust_compare/qr_verify.rs + test/factorizations_tests.jl @testitem "qr_golden")
+#   D-B  qr_in_place_unblocked! — column-by-column Householder reduction (base kernel, n ≤ threshold)
+#   D-C  qr_in_place_blocked!   — blocked driver: panel reduction + trailing update via WY representation
+#
+# The golden file is bench/rust_compare/qr_golden.txt.  Regenerate:
+#   cd bench/rust_compare/rust && cargo build --release --bin qr_verify
+#   ./target/release/qr_verify > ../qr_golden.txt
+
 end # module Factorizations
