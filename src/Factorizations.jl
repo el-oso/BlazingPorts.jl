@@ -204,7 +204,38 @@ end
 function _syrk_lower!(p11::Ptr{Float64}, p10::Ptr{Float64}, m::Int, bs::Int, ld::Int)
     j = 1
     @inbounds while j + NC - 1 <= m
+        # NB: computing the full m×m (i from 1) — counter-intuitively faster than the triangular variant
+        # (i from j): the aligned, regular, full-length row tiles beat the irregular/misaligned triangular
+        # sweep, even at 2× the flops. (Tried i=j: regressed n=256 0.83→0.74×.)
         i = 1
+        while i + 3W - 1 <= m   # MR=3 × NC=4 = 12 accumulators (reuse 3 row-vector loads across 4 cols)
+            r1 = i + W; r2 = i + 2W
+            e00 = _vptr(p11, i, j, ld);      A00 = vload(Vec{W,Float64}, e00)
+            e10 = _vptr(p11, r1, j, ld);     C00 = vload(Vec{W,Float64}, e10)
+            e20 = _vptr(p11, r2, j, ld);     D00 = vload(Vec{W,Float64}, e20)
+            e01 = _vptr(p11, i, j + 1, ld);  A01 = vload(Vec{W,Float64}, e01)
+            e11 = _vptr(p11, r1, j + 1, ld); C01 = vload(Vec{W,Float64}, e11)
+            e21 = _vptr(p11, r2, j + 1, ld); D01 = vload(Vec{W,Float64}, e21)
+            e02 = _vptr(p11, i, j + 2, ld);  A02 = vload(Vec{W,Float64}, e02)
+            e12 = _vptr(p11, r1, j + 2, ld); C02 = vload(Vec{W,Float64}, e12)
+            e22 = _vptr(p11, r2, j + 2, ld); D02 = vload(Vec{W,Float64}, e22)
+            e03 = _vptr(p11, i, j + 3, ld);  A03 = vload(Vec{W,Float64}, e03)
+            e13 = _vptr(p11, r1, j + 3, ld); C03 = vload(Vec{W,Float64}, e13)
+            e23 = _vptr(p11, r2, j + 3, ld); D03 = vload(Vec{W,Float64}, e23)
+            for c in 1:bs
+                v0 = vload(Vec{W,Float64}, _vptr(p10, i, c, ld))
+                v1 = vload(Vec{W,Float64}, _vptr(p10, r1, c, ld))
+                v2 = vload(Vec{W,Float64}, _vptr(p10, r2, c, ld))
+                g0 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j, c, ld)));     A00 = muladd(g0, v0, A00); C00 = muladd(g0, v1, C00); D00 = muladd(g0, v2, D00)
+                g1 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 1, c, ld))); A01 = muladd(g1, v0, A01); C01 = muladd(g1, v1, C01); D01 = muladd(g1, v2, D01)
+                g2 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 2, c, ld))); A02 = muladd(g2, v0, A02); C02 = muladd(g2, v1, C02); D02 = muladd(g2, v2, D02)
+                g3 = Vec{W,Float64}(-unsafe_load(p10, _lidx(j + 3, c, ld))); A03 = muladd(g3, v0, A03); C03 = muladd(g3, v1, C03); D03 = muladd(g3, v2, D03)
+            end
+            vstore(A00, e00); vstore(A01, e01); vstore(A02, e02); vstore(A03, e03)
+            vstore(C00, e10); vstore(C01, e11); vstore(C02, e12); vstore(C03, e13)
+            vstore(D00, e20); vstore(D01, e21); vstore(D02, e22); vstore(D03, e23)
+            i += 3W
+        end
         while i + 2W - 1 <= m   # MR=2 × NC=4 = 8 accumulators (reuse 2 row-vector loads across 4 cols)
             r1 = i + W
             d00 = _vptr(p11, i, j, ld);     A00 = vload(Vec{W,Float64}, d00)
