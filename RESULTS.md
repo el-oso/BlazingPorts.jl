@@ -206,9 +206,35 @@ triangular).
    `@assert_vectorized`+`@assert_noalloc` identically, yet they span **0.12×→0.47×** at n=256 — the
    guarantees cannot see blocking quality. The missing lever is a **cache/register-tiling guarantee**.
 
-➡ **To actually reach faer at n≥256**: triangular syrk (halve flops) + L2 cache blocking of the `c`
-panel + a packed register microkernel (the OpenBLAS/faer recipe). Or accept that for ≤128 pure Julia is
-at parity and stop. (QR — Layer D — follows.)
+### Decisive experiment — even Octavian's gemm doesn't close it (the gap is the whole pipeline)
+
+Tried two more levers: (i) **triangular + MR=2 (8-accumulator) tile** — *regressed* (n=256 0.43→0.38×,
+n=128 1.07→0.91×): the scalar diagonal **corner** (NC²/2·bs scalar FMAs per 4-col block) costs more than
+the triangular flop saving at these sizes. (ii) **Octavian** (Julia's tuned gemm — matched OpenBLAS in
+Tier 1) as the trailing `syrk` via `matmul_serial!`:
+
+| n | hand-tiled | **Octavian syrk** | OpenBLAS | faer |
+|---|-----------|-------------------|----------|------|
+| 128 | 1.08× | 1.12× | 1.02× | parity |
+| 256 | 0.45× | **0.50×** | 0.92× | (faer wins) |
+| 512 | 0.24× | **0.35×** | 0.83× | (faer wins) |
+| 1024 | 0.22× | **0.42×** | 0.89× | (faer wins) |
+
+**A world-class gemm in the trailing position only lifts 0.24→0.35× at n=512** — because the cost is
+**distributed across the whole pipeline**: the panel `trsm` (un-blocked, O(bs²·m), comparable to syrk),
+the recursion/blocking structure, and packing — not one kernel. And **faer beats even OpenBLAS**
+(0.83–0.92×), so the target is a SOTA end-to-end LA pipeline, not "a good gemm."
+
+**Conclusion:** pure-Julia Cholesky is **at parity through n≤128**; reaching faer at **n≥256 = matching a
+SOTA LA library end-to-end** (co-tuned trsm + triangular packed syrk + multi-level blocking) — an
+Octavian/BLIS-scale effort, not a one-kernel fix. **StrictMode finding, hardened:** every variant
+(naive / hand-tiled / @turbo / Octavian-backed) passes all guarantees identically while spanning
+0.22×→0.50× at n=256 — the missing signal is *pipeline-level* blocking, which no per-call guarantee
+(and no single tuned kernel) captures. (See `StrictMode.jl/FEEDBACK.md` F10.)
+
+➡ **Options**: (a) accept parity-through-128 and stop; (b) optimize the next bottleneck (register-block
+the `trsm`) and re-measure; (c) full BLIS-style packed pipeline to chase faer at n≥256. (QR — Layer D —
+is independent and follows whichever way.)
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
