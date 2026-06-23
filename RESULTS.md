@@ -306,6 +306,34 @@ cost — neither wins. The recipe (reusable for other projects): **cache-derived
 non-packed, large-n packed** — and it's portable (no machine-specific constants). Next refinements for
 512/very-large-n: NC-blocking of the B panel + software prefetch + a remainder-safe microkernel.
 
+### ⚖️ Premise resolution — "same LLVM ⇒ same speed", settled at the microkernel (`bench/probe_microkernel_asm.jl`)
+
+faer's f64 matmul is hand-written x86 **assembly** (`private-gemm-x86` `build.rs`: `vfnmadd231pd
+zmm,zmm,[mem]{1to8}` memory-broadcast FMA, `M=4` zmm tile, BLIS packing) — it bypasses LLVM
+auto-vectorization. So the natural worry: does Julia (LLVM-from-SIMD.jl) lose to hand-asm? We tested it
+**directly** by porting faer's exact instruction via `Base.llvmcall` inline asm and racing it against the
+portable SIMD.jl kernel:
+
+```
+microkernel 8×8 (in-L1):  asm {1to8} = 75.4   SIMD.jl = 75.1   GFLOP/s   (identical, both correct)
+OpenBLAS single-thread dgemm (real full-gemm ceiling) = 63
+implied sustained AVX-512 clock = 75.4/32 = 2.36 GHz
+```
+
+**Correction of an earlier claim:** the "~50% of peak / codegen gap" was a *measurement artifact* — I'd
+compared against a phantom 144 GFLOP/s (base-clock assumption). Zen5 **downclocks hard under sustained
+AVX-512** to ~2.36 GHz, so the real single-core peak is ~76 GFLOP/s. Our kernel sits at **~99% of it**,
+and the hand-asm `{1to8}` kernel — faer's literal instruction — is **no faster**. LLVM's "broadcast-once +
+reuse" saturates the FMA units just as well as `{1to8}`.
+
+**Conclusion: the premise HOLDS at the microkernel level.** Portable SIMD.jl IR already matches
+hand-written assembly and reaches hardware peak; the inline-asm path is unnecessary (and would only cost
+portability). Any residual faer edge at the *full-factorization* level is **algorithmic** — blocking,
+packing efficiency, and the serial base→trsm→syrk dependency chain that caps Cholesky at ~25–30% of the
+gemm peak for everyone (faer included) — not microkernel codegen. That's portable to attack, and the
+packing work above already took 2048 to parity. (For ARM/AVX2 there's nothing to do: `{1to8}` is
+AVX-512-only; the optimal AVX2 sequence is `vbroadcastsd`+`vfmadd231pd`, exactly what LLVM emits.)
+
 ### Autotuned + remainder-safe packed kernel (`bench/probe_cholesky_autotuned.jl`)
 
 Two upgrades that make the packed kernel **drop-in for any project / any CPU**:
