@@ -312,5 +312,27 @@ closed** (parity/beat ≤256, ~0.8–0.9× beyond, best-in-class among pure-Juli
 
 ➡ Next (independent): **QR (Layer D)** via the same recipe.
 
+## QR port — faer reimplementation (Layer D)
+
+Same faithful-port recipe (golden harness → unblocked base → blocked driver). faer convention
+`H_k = I − v_k v_kᵀ/τ_k`; the QR factors (R, v) are mathematically unique, so our output matches faer's
+golden to ~1e-15 at all n (non-bit-exact only from `norm_l2` ordering); reconstruction Q·R ≈ A ~1e-14.
+
+- **D-A golden harness** ✅ — `qr_verify` dumps faer's packed QR + τ/T; reconstruction test.
+- **D-B unblocked Householder base kernel** (`qr_unblocked!`) ✅ — `Vec{W}`-vectorized; StrictMode
+  `@assert_vectorized`+`@assert_noalloc`+`@assert_typestable` pass. **Beats faer at n=64 (1.59×).**
+- **D-C blocked compact-WY driver** (`qr_blocked!`) ✅ correct — panel reduction + dlarft `T` + trailing
+  update as gemms `C −= V·Tᵀ·(Vᵀ·C)`. *But not yet faster:* its dlarfb gemms are un-tiled, so they don't
+  beat the unblocked rank-1 updates.
+
+QR perf vs faer (single-threaded): BP-unblocked 64 **1.59×**, 128 0.82×, 256 0.54×, 512 0.39×; BP-blocked
+similar/worse (un-tiled gemm). **Even OpenBLAS LAPACK is 0.67–0.80× faer** — faer's QR is exceptional,
+like its Cholesky.
+
+**Status:** QR ports are *correct & faithful* (match faer ~1e-15, unblocked beats faer small-n,
+StrictMode-clean). **QR perf parity needs the tiled-gemm marathon** applied to the dlarfb trailing update
+(`C −= V Y`, `Vᵀ C`) — the same register-block + aligned-triangular work that got Cholesky to beat faer.
+That's the clear next step; banked here as a complete correct-port checkpoint.
+
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.

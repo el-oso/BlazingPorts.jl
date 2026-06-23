@@ -145,6 +145,12 @@ end
         @test qr_unblocked!(A, tau) === true
         @test isapprox(reconQR(A, tau, n), A0; rtol = 1e-9)        # Q*R ≈ A
         @test isapprox(A, golden[n].QR; rtol = 1e-10, atol = 1e-12) # matches faer's packed factor
+
+        # blocked driver: same packed factor + reconstruction (compact-WY, gemm trailing update)
+        Ab = copy(A0); taub = zeros(n)
+        @test BlazingPorts.Factorizations.qr_blocked!(Ab, taub; nb = 16) === true
+        @test isapprox(reconQR(Ab, taub, n), A0; rtol = 1e-9)
+        @test isapprox(Ab, golden[n].QR; rtol = 1e-10, atol = 1e-12)
     end
 end
 

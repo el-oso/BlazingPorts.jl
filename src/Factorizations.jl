@@ -345,10 +345,10 @@ end
 # τ_k = Inf encodes a trivial (identity) reflector; v_k has implicit leading 1 at index k.
 #
 # Layer D-B (done): qr_unblocked!  — faithful port of faer `qr_in_place_unblocked` + `make_householder_in_place`.
-# Layer D-C (planned): blocked driver (compact-WY block reflectors I − V T⁻¹ Vᵀ).
+# Layer D-C (done): qr_blocked!    — compact-WY blocked driver (panel reduction + gemm trailing update).
 # Golden: bench/rust_compare/qr_golden.txt (regen: cargo build --release --bin qr_verify > ../qr_golden.txt).
 
-export qr_unblocked!
+export qr_unblocked!, qr_blocked!
 
 """
     qr_unblocked!(A, tau) -> true
@@ -430,6 +430,82 @@ function qr_unblocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64})
                 end
             end
         end
+    end
+    return true
+end
+
+"""
+    qr_blocked!(A, tau; nb=32) -> true
+
+Blocked compact-WY Householder QR (the perf path; same packed output as `qr_unblocked!`). Reduces each
+`nb`-column panel with `qr_unblocked!`, builds the compact-WY factor `T` (LAPACK dlarft, forward/columnwise
+with `λ_k = 1/tau_k` since faer's `H_k = I − v_k v_kᵀ/tau_k`), then applies `Qᵀ` to the trailing block as
+**gemms** `C −= V·(Tᵀ·(Vᵀ·C))` instead of `nb` rank-1 updates — turning the trailing update compute-bound.
+`tau` follows the faer convention (`Inf` ⇒ identity reflector). Reconstruction Q·R ≈ A to ~1e-13.
+"""
+function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 32)
+    m, n = size(A)
+    k = min(m, n)
+    pc = 1
+    @inbounds while pc <= k
+        pb = min(nb, k - pc + 1)
+        qr_unblocked!(view(A, pc:m, pc:pc+pb-1), view(tau, pc:pc+pb-1))   # panel reduction (within-panel)
+        jt0 = pc + pb
+        if jt0 <= n
+            mp = m - pc + 1
+            nt = n - jt0 + 1
+            # V (mp×pb): unit-diagonal trapezoid, essential parts from below the panel diagonal.
+            V = Matrix{Float64}(undef, mp, pb)
+            for c in 1:pb, i in 1:mp
+                V[i, c] = i == c ? 1.0 : (i > c ? A[pc + i - 1, pc + c - 1] : 0.0)
+            end
+            # compact-WY T (pb×pb upper-tri), λ_c = 1/tau_c; Q = I − V T Vᵀ  (LAPACK dlarft).
+            T = zeros(pb, pb)
+            for c in 1:pb
+                tc = tau[pc + c - 1]
+                λ = isfinite(tc) ? 1.0 / tc : 0.0
+                T[c, c] = λ
+                if c > 1 && λ != 0.0
+                    w = zeros(c - 1)                       # w = V[:,1:c-1]ᵀ V[:,c]
+                    for kk in 1:c-1, i in 1:mp
+                        w[kk] = muladd(V[i, kk], V[i, c], w[kk])
+                    end
+                    for r in 1:c-1                          # T[1:c-1,c] = −λ · T[1:c-1,1:c-1] · w
+                        s = 0.0
+                        for kk in r:c-1
+                            s = muladd(T[r, kk], w[kk], s)
+                        end
+                        T[r, c] = -λ * s
+                    end
+                end
+            end
+            # trailing update C −= V · (Tᵀ · (Vᵀ · C)), C = A[pc:m, jt0:n]
+            C = view(A, pc:m, jt0:n)
+            Wm = zeros(pb, nt)                              # Wm = Vᵀ C
+            for j in 1:nt, c in 1:pb
+                s = 0.0
+                @simd for i in 1:mp
+                    s = muladd(V[i, c], C[i, j], s)
+                end
+                Wm[c, j] = s
+            end
+            Y = zeros(pb, nt)                               # Y = Tᵀ Wm  (Tᵀ lower-tri)
+            for j in 1:nt, c in 1:pb
+                s = 0.0
+                for r in 1:c
+                    s = muladd(T[r, c], Wm[r, j], s)
+                end
+                Y[c, j] = s
+            end
+            for j in 1:nt, c in 1:pb                        # C −= V Y
+                y = Y[c, j]
+                y == 0.0 && continue
+                @simd for i in 1:mp
+                    C[i, j] = muladd(-V[i, c], y, C[i, j])
+                end
+            end
+        end
+        pc += pb
     end
     return true
 end
