@@ -306,6 +306,25 @@ cost — neither wins. The recipe (reusable for other projects): **cache-derived
 non-packed, large-n packed** — and it's portable (no machine-specific constants). Next refinements for
 512/very-large-n: NC-blocking of the B panel + software prefetch + a remainder-safe microkernel.
 
+### Autotuned + remainder-safe packed kernel (`bench/probe_cholesky_autotuned.jl`)
+
+Two upgrades that make the packed kernel **drop-in for any project / any CPU**:
+
+1. **`@generated` tile-parameterized microkernel** — the `MR×NR` register tile is a type parameter, so
+   every tile is JIT-unrolled/specialized for free. This is the **Julia differentiator vs C/Rust**: no
+   build-time `#ifdef`/codegen, no separate binaries — the optimal kernel for *this* CPU is compiled at
+   first call.
+2. **Runtime autotuner (FFTW-"plan" style)** — benchmarks the candidate tiles on the host once and caches
+   the winner. Uses **median-of-25** (not min) for robust selection (project policy + avoids a lucky
+   single run picking a bad tile). On this Zen5 it independently chose **`(MR,NR)=(3,4)`** — the exact
+   tile we'd hand-tuned for the syrk (validation). On a narrower ISA (AVX2, fewer registers) it would
+   pick a smaller tile automatically.
+3. **Remainder-safe** — full interior tiles use the fast unrolled kernel; bottom/right/near-diagonal
+   edges use a masked kernel (SIMD.jl masked `vload`/`vstore`), so **arbitrary `n` works** (verified
+   correct at n = 300/1000/1500, not just powers of two). No divisibility requirement, no fallback.
+
+Everything machine-specific is queried: `W` from the host, `MC` from L2, `(MR,NR)` from the autotuner.
+
 ### n≥512 — the earlier ceiling exploration (pre-packing)
 
 Pushed n=512 three more ways, all measured:
