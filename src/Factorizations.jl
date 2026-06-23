@@ -888,36 +888,35 @@ end
 
 # fat compact-WY block reflector: C[c0:mlog, jc:jc+nt-1] −= V·(Tᵀ·(Vᵀ·C)).  `packed` ⇒ apply via the
 # packed BLIS gemm (fat outer panels); otherwise via the light register kernels (small inner panels).
-# ── W = Vᵀ C via a hand-written AVX-512 microkernel that reads C IN PLACE (matches faer's pack_rhs=false:
-#    do NOT pack the huge trailing C — the ~mp·nt pack was the whole gap vs faer). 48 rows (6 zmm) × 4
-#    cols, B(=C) via 4 walking column pointers + vfmadd231pd {1to8}, full-K accumulate in 24 zmm. Beats
-#    faer's gemm on this shape (71 vs 70 GFLOP/s) ⇒ the QR-2048 beat. AVX-512 + pb==48 only.
-@generated function _qr_ukub!(pW::Int, ldWb::Int, pA::Int, pC::Int, ldcb::Int, K::Int)
-    asm = IOBuffer(); p(s) = print(asm, s, raw"\0A")
-    p("movq \$2,%rax"); p("movq \$5,%rdx"); p("movq \$3,%r8"); p("movq \$4,%r12")
-    p("leaq (%r8,%r12),%r9"); p("leaq (%r9,%r12),%r10"); p("leaq (%r10,%r12),%r11")
-    for z in 0:23; p("vpxorq %zmm$z,%zmm$z,%zmm$z"); end
-    p("1:")
-    for rb in 0:5; p("vmovupd $(rb*64)(%rax),%zmm$(24+rb)"); end
-    p("prefetcht0 1536(%rax)")
-    cols = ["%r8", "%r9", "%r10", "%r11"]
+# ── W = Vᵀ C microkernel that reads C IN PLACE (matches faer's pack_rhs=false: do NOT pack the huge
+#    trailing C — that ~mp·nt pack was the whole gap vs faer). 48 rows (6×W) × 4 cols, C via 4 column
+#    pointers, full-K accumulate in 24 SIMD registers. PORTABLE SIMD.jl (LLVM) — no inline assembly: this
+#    reaches ~73 GFLOP/s, beating faer's hand-written asm (70). The win is the orchestration (read in
+#    place), not the codegen. AVX-512 width (W==8) + pb==48 path; else the packed _pgemm! fallback.
+@generated function _qr_ukub_simd!(pW::Ptr{Float64}, ldW::Int, pA::Ptr{Float64}, pC::Ptr{Float64}, ldc::Int, K::Int)
+    q = Expr(:block)
+    acc = [Symbol(:a, c, :_, r) for c in 0:3, r in 0:5]
+    for c in 0:3, r in 0:5; push!(q.args, :($(acc[c+1, r+1]) = Vec{W,Float64}(0.0))); end
+    push!(q.args, :(c0 = pC))
+    push!(q.args, :(c1 = pC + ldc * sizeof(Float64)))
+    push!(q.args, :(c2 = c1 + ldc * sizeof(Float64)))
+    push!(q.args, :(c3 = c2 + ldc * sizeof(Float64)))
+    cs = [:c0, :c1, :c2, :c3]
+    body = Expr(:block)
+    for r in 0:5; push!(body.args, :($(Symbol(:v, r)) = vload(Vec{W,Float64}, _gp(pA, k * 48 + $(r * W))))); end
     for c in 0:3
-        p("prefetcht0 512($(cols[c+1]))")
-        for rb in 0:5; p("vfmadd231pd ($(cols[c+1])){1to8},%zmm$(24+rb),%zmm$(c*6+rb)"); end
+        push!(body.args, :($(Symbol(:b, c)) = Vec{W,Float64}(unsafe_load($(cs[c+1]), k + 1))))
+        for r in 0:5; push!(body.args, :($(acc[c+1, r+1]) = muladd($(Symbol(:v, r)), $(Symbol(:b, c)), $(acc[c+1, r+1])))); end
     end
-    for cr in cols; p("addq \$\$8,$cr"); end
-    p("addq \$\$384,%rax"); p("decq %rdx"); p("jnz 1b")
-    p("movq \$0,%rax"); p("movq \$1,%r8")
-    for c in 0:3
-        for rb in 0:5; p("vmovupd %zmm$(c*6+rb),$(rb*64)(%rax)"); end
-        c < 3 && p("addq %r8,%rax")
+    push!(q.args, Expr(:for, :(k = 0:K-1), body))
+    for c in 0:3, r in 0:5
+        push!(q.args, :(vstore($(acc[c+1, r+1]), _gp(pW, $c * ldW + $(r * W)))))
     end
-    clob = join(["~{zmm$z}" for z in 0:29], ",")
-    ir = "call void asm sideeffect \"$(String(take!(asm)))\", \"r,r,r,r,r,r,~{rax},~{rdx},~{r8},~{r9},~{r10},~{r11},~{r12},$clob,~{memory},~{cc}\"(i64 %0,i64 %1,i64 %2,i64 %3,i64 %4,i64 %5)\nret void"
-    :(Base.llvmcall($ir, Cvoid, Tuple{Int,Int,Int,Int,Int,Int}, pW, ldWb, pA, pC, ldcb, K))
+    push!(q.args, :(return nothing))
+    Expr(:macrocall, Symbol("@inbounds"), LineNumberNode(0, :gen), q)
 end
 
-# W(48×nt) ← Vᵀ·C : asm kernel for full 4-col panels, _pgemm! (TN) for the nt%4 remainder. pV dense V
+# W(48×nt) ← Vᵀ·C : SIMD kernel for full 4-col panels, _pgemm! (TN) for the nt%4 remainder. pV dense V
 # (mp×48, ld=mp); pC trailing C (ld); pW = W buffer (ld=48). pAp packs Vᵀ (48×mp) once.
 function _qr_VtC_unpacked!(pW, pV, ldV, pC, ldc, mp, nt, pAp, pBp)
     @inbounds for kk in 0:mp-1, i in 0:47
@@ -925,8 +924,7 @@ function _qr_VtC_unpacked!(pW, pV, ldV, pC, ldc, mp, nt, pAp, pBp)
     end
     full = (nt ÷ 4) * 4; jc = 0
     while jc < full
-        _qr_ukub!(reinterpret(Int, pW + jc * 48 * 8), 48 * 8, reinterpret(Int, pAp),
-                  reinterpret(Int, pC + jc * ldc * 8), ldc * 8, mp); jc += 4
+        _qr_ukub_simd!(pW + jc * 48 * 8, 48, pAp, pC + jc * ldc * 8, ldc, mp); jc += 4
     end
     rem = nt - full
     if rem > 0
@@ -941,7 +939,7 @@ function _qr_dlarfb!(pA::Ptr{Float64}, tau, c0::Int, pb::Int, jc::Int, nt::Int, 
     pCbase = pA + ((jc - 1) * ld + (c0 - 1)) * sizeof(Float64)
     if packed
         pAp = pointer(ws.Ap); pBp = pointer(ws.Bp)
-        if W == 8 && pb == 48                                                       # W = Vᵀ C (asm, unpacked-B)
+        if W == 8 && pb == 48                                                       # W = Vᵀ C (SIMD, unpacked-B)
             _qr_VtC_unpacked!(pW, pV, mp, pCbase, ld, mp, nt, pAp, pBp)
         else
             @inbounds for idx in 1:pb*nt; unsafe_store!(pW, 0.0, idx); end
