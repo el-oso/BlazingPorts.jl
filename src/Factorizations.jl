@@ -787,13 +787,16 @@ end
 end
 # C(m×n,ldc) += α·op(A)·B   (tA ⇒ A is transposed: op(A)[i,k]=A[k,i]).  pAp,pBp = preallocated packs.
 function _pgemm!(pC, ldc, pA, lda, pB, ldb, m, n, k, α, pAp, pBp, tA::Bool)
+    # MC-block only when the packed-A panel (m × KC) wouldn't fit L2; for thin-K shapes (e.g. the QR's
+    # C−=VY, K=pb) it fits, and MC-blocking would just add B-repacking overhead (measured 57→67 GFLOP/s).
+    MCb = (m * min(k, G_KC) * sizeof(Float64) <= Int(VectorizationBase.cache_size(Val(2)))) ? m : G_MC
     jc = 0
     @inbounds while jc < n
         nc = min(G_NC, n - jc); kk = 0
         while kk < k
             kc = min(G_KC, k - kk); _packBg!(pBp, pB, kk, jc, kc, nc, ldb); ic = 0
             while ic < m
-                mc = min(G_MC, m - ic)
+                mc = min(MCb, m - ic)
                 tA ? _packAT!(pAp, pA, ic, kk, mc, kc, lda) : _packA!(pAp, pA, ic, kk, mc, kc, lda)
                 jr = 0
                 while jr < nc
@@ -857,7 +860,7 @@ QRWorkspace(n::Integer; NB::Int = QR_NB) = QRWorkspace(
     Vector{Float64}(undef, (n + 8) * NB), Vector{Float64}(undef, NB * NB),
     Vector{Float64}(undef, NB * n), Vector{Float64}(undef, NB * n),
     Vector{Float64}(undef, NB),
-    Vector{Float64}(undef, cld(G_MC, GMRW) * GMRW * G_KC), Vector{Float64}(undef, cld(G_NC, GNR) * GNR * G_KC),
+    Vector{Float64}(undef, cld(n + 8, GMRW) * GMRW * G_KC), Vector{Float64}(undef, cld(G_NC, GNR) * GNR * G_KC),
     NB)
 
 # fat compact-WY block reflector: C[c0:mlog, jc:jc+nt-1] −= V·(Tᵀ·(Vᵀ·C)), reflectors width pb at (c0,c0).
