@@ -728,8 +728,100 @@ end
 # QR) then applies ONE fat dlarfb (k=NB), turning the trailing update compute-bound. The fat dlarfb is
 # cache-blocked over NC trailing columns so the panel stays cache-resident across the kernels' reuse.
 
-const QR_NB = 64                    # outer panel width (measured optimum; larger regresses the inner reduction)
+const QR_NB = 48                    # outer panel width (measured optimum with the packed fat dlarfb)
 const QR_2LEVEL_MIN = 1536          # below this the flat driver already beats faer
+
+# ── packed BLIS gemm for the fat outer dlarfb (pack A→GMRW-panels, B→GNR-panels; 3-level MC/KC/NC) ──
+# The non-packed kernels are memory-bound on the fat (pb≈48) W=VᵀC; this packed gemm reaches ~peak.
+const GMR = 2; const GNR = 6; const GMRW = GMR * W
+const G_KC = let l1 = Int(VectorizationBase.cache_size(Val(1))); kc = (l1 ÷ 2) ÷ (GNR * 8); max(W, (kc ÷ W) * W) end
+const G_MC = let l2 = Int(VectorizationBase.cache_size(Val(2))); mc = (l2 ÷ 2) ÷ (G_KC * 8); max(GMRW, (mc ÷ GMRW) * GMRW) end
+const G_NC = 4096
+@inline _gp(p, e) = p + e * sizeof(Float64)
+
+@inline function _packA!(pAp, pA, i0, k0, mc, kc, ld)                 # pack A[i,k]  (NN)
+    np = cld(mc, GMRW)
+    @inbounds for p in 0:np-1, k in 0:kc-1, r in 0:GMRW-1
+        v = (p * GMRW + r < mc) ? unsafe_load(pA, (k0 + k) * ld + (i0 + p * GMRW + r) + 1) : 0.0
+        unsafe_store!(pAp, v, p * GMRW * kc + k * GMRW + r + 1)
+    end
+end
+@inline function _packAT!(pAp, pV, i0, k0, mc, kc, ldV)               # pack A[i,k]=V[k,i]  (TN)
+    np = cld(mc, GMRW)
+    @inbounds for p in 0:np-1, k in 0:kc-1, r in 0:GMRW-1
+        v = (p * GMRW + r < mc) ? unsafe_load(pV, (i0 + p * GMRW + r) * ldV + (k0 + k) + 1) : 0.0
+        unsafe_store!(pAp, v, p * GMRW * kc + k * GMRW + r + 1)
+    end
+end
+@inline function _packBg!(pBp, pB, k0, j0, kc, nc, ld)
+    np = cld(nc, GNR)
+    @inbounds for p in 0:np-1, k in 0:kc-1, c in 0:GNR-1
+        v = (p * GNR + c < nc) ? unsafe_load(pB, (j0 + p * GNR + c) * ld + (k0 + k) + 1) : 0.0
+        unsafe_store!(pBp, v, p * kc * GNR + k * GNR + c + 1)
+    end
+end
+@inline function _gemm_uk!(pC, ldc, pAp, aoff, pBp, boff, kc, ir, jr, mr, nr, α)
+    z = Vec{W,Float64}(0.0); a0 = z; a1 = z; a2 = z; a3 = z; a4 = z; a5 = z; b0 = z; b1 = z; b2 = z; b3 = z; b4 = z; b5 = z
+    @inbounds for k in 0:kc-1
+        av0 = vload(Vec{W,Float64}, _gp(pAp, aoff + k * GMRW)); av1 = vload(Vec{W,Float64}, _gp(pAp, aoff + k * GMRW + W)); bk = boff + k * GNR
+        s0 = Vec{W,Float64}(unsafe_load(pBp, bk + 1)); a0 = muladd(av0, s0, a0); b0 = muladd(av1, s0, b0)
+        s1 = Vec{W,Float64}(unsafe_load(pBp, bk + 2)); a1 = muladd(av0, s1, a1); b1 = muladd(av1, s1, b1)
+        s2 = Vec{W,Float64}(unsafe_load(pBp, bk + 3)); a2 = muladd(av0, s2, a2); b2 = muladd(av1, s2, b2)
+        s3 = Vec{W,Float64}(unsafe_load(pBp, bk + 4)); a3 = muladd(av0, s3, a3); b3 = muladd(av1, s3, b3)
+        s4 = Vec{W,Float64}(unsafe_load(pBp, bk + 5)); a4 = muladd(av0, s4, a4); b4 = muladd(av1, s4, b4)
+        s5 = Vec{W,Float64}(unsafe_load(pBp, bk + 6)); a5 = muladd(av0, s5, a5); b5 = muladd(av1, s5, b5)
+    end
+    A = (a0, a1, a2, a3, a4, a5); B = (b0, b1, b2, b3, b4, b5); av = Vec{W,Float64}(α)
+    @inbounds for c in 1:nr
+        col = (jr + c - 1) * ldc + ir
+        if mr >= 2W
+            p0 = _gp(pC, col); vstore(muladd(av, A[c], vload(Vec{W,Float64}, p0)), p0)
+            p1 = _gp(pC, col + W); vstore(muladd(av, B[c], vload(Vec{W,Float64}, p1)), p1)
+        elseif mr >= W
+            p0 = _gp(pC, col); vstore(muladd(av, A[c], vload(Vec{W,Float64}, p0)), p0)
+            for r in W:mr-1; e = col + r; unsafe_store!(pC, unsafe_load(pC, e + 1) + α * B[c][r-W+1], e + 1); end
+        else
+            for r in 0:mr-1; e = col + r; unsafe_store!(pC, unsafe_load(pC, e + 1) + α * A[c][r+1], e + 1); end
+        end
+    end
+end
+# C(m×n,ldc) += α·op(A)·B   (tA ⇒ A is transposed: op(A)[i,k]=A[k,i]).  pAp,pBp = preallocated packs.
+function _pgemm!(pC, ldc, pA, lda, pB, ldb, m, n, k, α, pAp, pBp, tA::Bool)
+    jc = 0
+    @inbounds while jc < n
+        nc = min(G_NC, n - jc); kk = 0
+        while kk < k
+            kc = min(G_KC, k - kk); _packBg!(pBp, pB, kk, jc, kc, nc, ldb); ic = 0
+            while ic < m
+                mc = min(G_MC, m - ic)
+                tA ? _packAT!(pAp, pA, ic, kk, mc, kc, lda) : _packA!(pAp, pA, ic, kk, mc, kc, lda)
+                jr = 0
+                while jr < nc
+                    nr = min(GNR, nc - jr); bpan = (jr ÷ GNR) * kc * GNR; ir = 0
+                    while ir < mc
+                        mr = min(GMRW, mc - ir); apan = (ir ÷ GMRW) * GMRW * kc
+                        _gemm_uk!(pC, ldc, pAp, apan, pBp, bpan, kc, ic + ir, jc + jr, mr, nr, α)
+                        ir += GMRW
+                    end
+                    jr += GNR
+                end
+                ic += mc
+            end
+            kk += kc
+        end
+        jc += nc
+    end
+end
+
+# Σ_i V[i,ka]·V[i,kb] (vectorized over contiguous rows; V ld=mp, 0-based cols) — for a fast dlarft.
+@inline function _gvdot(pV, ka, kb, mp)
+    acc = Vec{W,Float64}(0.0); ba = ka * mp; bb = kb * mp; i = 0
+    @inbounds while i + W <= mp
+        acc = muladd(vload(Vec{W,Float64}, _gp(pV, ba + i)), vload(Vec{W,Float64}, _gp(pV, bb + i)), acc); i += W
+    end
+    s = sum(acc); @inbounds while i < mp; s = muladd(unsafe_load(pV, ba + i + 1), unsafe_load(pV, bb + i + 1), s); i += 1; end
+    s
+end
 
 # host-derived trailing-column block: keep a C-panel (mp×NC) within ~½ L2 so the kernels' reuse hits cache
 @inline function _qr_nc(mp::Int)
@@ -757,31 +849,30 @@ struct QRWorkspace
     W::Vector{Float64}   # NB×n column-block scratch
     Y::Vector{Float64}   # NB×n
     w::Vector{Float64}   # NB
+    Ap::Vector{Float64}  # packed-gemm A buffer
+    Bp::Vector{Float64}  # packed-gemm B buffer
     NB::Int
 end
 QRWorkspace(n::Integer; NB::Int = QR_NB) = QRWorkspace(
     Vector{Float64}(undef, (n + 8) * NB), Vector{Float64}(undef, NB * NB),
     Vector{Float64}(undef, NB * n), Vector{Float64}(undef, NB * n),
-    Vector{Float64}(undef, NB), NB)
+    Vector{Float64}(undef, NB),
+    Vector{Float64}(undef, cld(G_MC, GMRW) * GMRW * G_KC), Vector{Float64}(undef, cld(G_NC, GNR) * GNR * G_KC),
+    NB)
 
 # fat compact-WY block reflector: C[c0:mlog, jc:jc+nt-1] −= V·(Tᵀ·(Vᵀ·C)), reflectors width pb at (c0,c0).
 # Builds dense V + T into ws, then applies in NC-column cache blocks via the tiled gemm kernels.
-function _qr_dlarfb!(pA::Ptr{Float64}, tau, c0::Int, pb::Int, jc::Int, nt::Int, mlog::Int, ld::Int, ws::QRWorkspace)
+@inline function _qr_buildVT!(pA, tau, c0, pb, mlog, ld, pV, pT, pw)
     mp = mlog - c0 + 1
-    pV = pointer(ws.V); pT = pointer(ws.T); pW = pointer(ws.W); pY = pointer(ws.Y); pw = pointer(ws.w)
     @inbounds for c in 1:pb, i in 1:mp                       # dense V (ld=mp) from A's unit-trapezoid
         gi = c0 + i - 1; gc = c0 + c - 1
         unsafe_store!(pV, gi == gc ? 1.0 : (gi > gc ? unsafe_load(pA, (gc - 1) * ld + gi) : 0.0), (c - 1) * mp + i)
     end
-    @inbounds for c in 1:pb                                  # dlarft → T (ld=pb), λ=1/τ
+    @inbounds for c in 1:pb                                  # dlarft → T (ld=pb), λ=1/τ; VᵀV vectorized
         tc = tau[c0 + c - 1]; λ = isfinite(tc) ? 1.0 / tc : 0.0
         unsafe_store!(pT, λ, (c - 1) * pb + c)
         if c > 1 && λ != 0.0
-            for k in 1:c-1
-                s = 0.0
-                for i in 1:mp; s = muladd(unsafe_load(pV, (k - 1) * mp + i), unsafe_load(pV, (c - 1) * mp + i), s); end
-                unsafe_store!(pw, s, k)
-            end
+            for k in 1:c-1; unsafe_store!(pw, _gvdot(pV, k - 1, c - 1, mp), k); end
             for r in 1:c-1
                 s = 0.0
                 for k in r:c-1; s = muladd(unsafe_load(pT, (k - 1) * pb + r), unsafe_load(pw, k), s); end
@@ -789,26 +880,33 @@ function _qr_dlarfb!(pA::Ptr{Float64}, tau, c0::Int, pb::Int, jc::Int, nt::Int, 
             end
         end
     end
-    NC = _qr_nc(mp)
+    mp
+end
+
+# fat compact-WY block reflector: C[c0:mlog, jc:jc+nt-1] −= V·(Tᵀ·(Vᵀ·C)).  `packed` ⇒ apply via the
+# packed BLIS gemm (fat outer panels); otherwise via the light register kernels (small inner panels).
+function _qr_dlarfb!(pA::Ptr{Float64}, tau, c0::Int, pb::Int, jc::Int, nt::Int, mlog::Int, ld::Int, ws::QRWorkspace, packed::Bool)
+    pV = pointer(ws.V); pT = pointer(ws.T); pW = pointer(ws.W); pY = pointer(ws.Y); pw = pointer(ws.w)
+    mp = _qr_buildVT!(pA, tau, c0, pb, mlog, ld, pV, pT, pw)
     pCbase = pA + ((jc - 1) * ld + (c0 - 1)) * sizeof(Float64)
-    jb = 0
-    @inbounds while jb < nt
-        bc = min(NC, nt - jb)
-        pC = pCbase + jb * ld * sizeof(Float64)
-        _qr_VtC!(pW, pV, pC, mp, bc, pb, ld)                 # W = Vᵀ C_block
-        for j in 1:bc, c in 1:pb                             # Y = Tᵀ W
+    if packed
+        pAp = pointer(ws.Ap); pBp = pointer(ws.Bp)
+        @inbounds for idx in 1:pb*nt; unsafe_store!(pW, 0.0, idx); end
+        _pgemm!(pW, pb, pV, mp, pCbase, ld, pb, nt, mp, 1.0, pAp, pBp, true)        # W = Vᵀ C  (TN)
+        @inbounds for j in 1:nt, c in 1:pb                                          # Y = Tᵀ W
             s = 0.0
             for r in 1:c; s = muladd(unsafe_load(pT, (c - 1) * pb + r), unsafe_load(pW, (j - 1) * pb + r), s); end
             unsafe_store!(pY, s, (j - 1) * pb + c)
         end
-        MC = _qr_mc(pb)                                      # C_block −= V Y, MC-row-blocked (V-panel in L1)
-        rb = 0
-        while rb < mp
-            mr = min(MC, mp - rb)
-            _qr_subVY!(pC + rb * sizeof(Float64), pV + rb * sizeof(Float64), pY, mr, bc, pb, ld, mp)
-            rb += mr
+        _pgemm!(pCbase, ld, pV, mp, pY, pb, mp, nt, pb, -1.0, pAp, pBp, false)      # C −= V Y  (NN)
+    else                                                # inner panels: thin pb, small nt → direct kernels
+        _qr_VtC!(pW, pV, pCbase, mp, nt, pb, ld)
+        @inbounds for j in 1:nt, c in 1:pb
+            s = 0.0
+            for r in 1:c; s = muladd(unsafe_load(pT, (c - 1) * pb + r), unsafe_load(pW, (j - 1) * pb + r), s); end
+            unsafe_store!(pY, s, (j - 1) * pb + c)
         end
-        jb += bc
+        _qr_subVY!(pCbase, pV, pY, mp, nt, pb, ld)
     end
 end
 
@@ -826,11 +924,11 @@ function _qr_2level_core!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float6
                 pb = min(ib, oc + ob - ic)
                 qr_unblocked!(view(A, ic:mlog, ic:ic+pb-1), view(tau, ic:ic+pb-1))
                 jt = ic + pb; jhi = oc + ob - 1
-                jt <= jhi && _qr_dlarfb!(pA, tau, ic, pb, jt, jhi - jt + 1, mlog, ld, ws)
+                jt <= jhi && _qr_dlarfb!(pA, tau, ic, pb, jt, jhi - jt + 1, mlog, ld, ws, false)  # inner: light
                 ic += pb
             end
-            jt0 = oc + ob                                    # fat outer dlarfb (k=ob) on the trailing block
-            jt0 <= n && _qr_dlarfb!(pA, tau, oc, ob, jt0, n - jt0 + 1, mlog, ld, ws)
+            jt0 = oc + ob                                    # fat outer dlarfb (k=ob) via packed gemm
+            jt0 <= n && _qr_dlarfb!(pA, tau, oc, ob, jt0, n - jt0 + 1, mlog, ld, ws, true)
             oc += ob
         end
     end
@@ -841,24 +939,12 @@ end
     qr_blocked!(A, tau, ws::QRWorkspace) -> true
 
 Two-level fat-panel QR (the n≥$QR_2LEVEL_MIN fast path), allocation-free given a preallocated
-[`QRWorkspace`](@ref). Pads a power-of-two leading dimension (the fat dlarfb gemm is ld-sensitive) by
-factoring in an `ld+8` scratch and copying back (bit-identical). The no-argument `qr_blocked!(A, tau)`
+[`QRWorkspace`](@ref). The fat trailing update is a packed BLIS gemm (which packs both operands, so it is
+insensitive to the leading dimension — no padding needed). The no-argument `qr_blocked!(A, tau)`
 auto-selects this path for large `n` and the flat driver otherwise.
 """
 function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}, ws::QRWorkspace)
-    m, n = size(A)
-    if ispow2(stride(A, 2))
-        P = Matrix{Float64}(undef, m + 8, n)
-        @inbounds for j in 1:n, i in 1:m
-            P[i, j] = A[i, j]
-        end
-        ok = _qr_2level_core!(P, tau, m, ws)
-        @inbounds for j in 1:n, i in 1:m
-            A[i, j] = P[i, j]
-        end
-        return ok
-    end
-    return _qr_2level_core!(A, tau, m, ws)
+    return _qr_2level_core!(A, tau, size(A, 1), ws)
 end
 
 end # module Factorizations

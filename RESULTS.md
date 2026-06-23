@@ -526,5 +526,24 @@ That's a separate, larger project (a single fused cache-blocked dlarfb that redu
 updates in one pass). **QR is beaten/parity through 1024 and improved to 0.73× at 2048; the 2048 beat
 remains open, gated on the fused backend — not on algorithm or codegen.**
 
+#### ✅ Fused backend SHIPPED — QR 2048 to near-parity (0.53× → ~0.91×)
+
+Built the fused backend in `src` (the "separate larger project" above). Pieces that closed it, each a
+measured lever:
+1. **Pure-Julia BLIS-packed gemm** (`_pgemm!`: pack A→GMRW-panels, B→GNR-panels, 3-level MC/KC/NC,
+   `MR=2×W`/`NR=6` microkernel) for the fat outer dlarfb — beats OpenBLAS at square (65.7 vs 61.7 GFLOP/s)
+   and hits ~peak on the skinny `W=VᵀC`/`C−=VY` shapes via packing (no per-`pb` re-streaming).
+2. **Vectorized dlarft** — the `VᵀV` Gram dots were scalar and O(mp·NB²) (dominant at large NB); a
+   `Vec{W}` dot (`_gvdot`) made fat panels viable (this alone moved 2048 0.75→0.91×).
+3. **Two-level hybrid**: fat outer panel `NB=48` via the packed gemm + thin inner (`ib=8`) reduction via
+   the light register kernels; no LDA padding (packed gemm is ld-agnostic). `QRWorkspace` carries the
+   pack buffers for an alloc-free hot loop.
+
+Single-threaded vs faer: **2048 ≈ 0.91× (ws reuse), up from 0.53×**; 1536 ≈ 0.87–0.90×; ≤1024 unchanged
+(flat path, beats/parity). Correct (recon ~1e-14, 266 tests). **Net: QR now beats/parity through 1024 and
+is near-parity (~0.9×) at 2048** — the 47% gap is down to ~9%. Not a clean beat at 2048, but the fused
+architecture is in place; the residual is fine-tuning (NB, dlarft/pack overhead) vs faer's hand-tuned
+`private-gemm-x86`. The square-gemm side-artifact (`bench/probe_gemm.jl`) beats OpenBLAS.
+
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
