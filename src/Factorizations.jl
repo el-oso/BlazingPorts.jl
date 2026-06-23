@@ -640,26 +640,20 @@ function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int)
     end
 end
 
-"""
-    qr_blocked!(A, tau; nb=32) -> true
-
-Blocked compact-WY Householder QR (the perf path; same packed output as `qr_unblocked!`). Reduces each
-`nb`-column panel with `qr_unblocked!`, builds the compact-WY factor `T` (LAPACK dlarft, forward/columnwise
-with `λ_k = 1/tau_k` since faer's `H_k = I − v_k v_kᵀ/tau_k`), then applies `Qᵀ` to the trailing block as
-**gemms** `C −= V·(Tᵀ·(Vᵀ·C))` instead of `nb` rank-1 updates — turning the trailing update compute-bound.
-`tau` follows the faer convention (`Inf` ⇒ identity reflector). Reconstruction Q·R ≈ A to ~1e-13.
-"""
-function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 8)
-    m, n = size(A)
+# Core: factor the leading `mlog × n` block of `A` (A may have extra trailing rows for padding; the
+# storage stride is A's). Operates only on single-level `view(A, …)` of a plain `Matrix`, so it never
+# specializes the kernels for a nested SubArray type (which crashes the compiler).
+function _qr_blocked_core!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}, mlog::Int, nb::Int)
+    n = size(A, 2)
     ld = stride(A, 2)
-    k = min(m, n)
+    k = min(mlog, n)
     pc = 1
     @inbounds while pc <= k
         pb = min(nb, k - pc + 1)
-        qr_unblocked!(view(A, pc:m, pc:pc+pb-1), view(tau, pc:pc+pb-1))   # panel reduction (within-panel)
+        qr_unblocked!(view(A, pc:mlog, pc:pc+pb-1), view(tau, pc:pc+pb-1))   # panel reduction (within-panel)
         jt0 = pc + pb
         if jt0 <= n
-            mp = m - pc + 1
+            mp = mlog - pc + 1
             nt = n - jt0 + 1
             # V (mp×pb): unit-diagonal trapezoid, essential parts from below the panel diagonal.
             V = Matrix{Float64}(undef, mp, pb)
@@ -706,5 +700,24 @@ function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; n
     end
     return true
 end
+
+"""
+    qr_blocked!(A, tau; nb=8) -> true
+
+Blocked compact-WY Householder QR (the perf path; same packed output as `qr_unblocked!`). Reduces each
+`nb`-column panel with `qr_unblocked!`, builds the compact-WY factor `T` (LAPACK dlarft, `λ_k = 1/tau_k`
+since faer's `H_k = I − v_k v_kᵀ/tau_k`), then applies `Qᵀ` to the trailing block as **gemms**
+`C −= V·(Tᵀ·(Vᵀ·C))`. `tau` follows the faer convention (`Inf` ⇒ identity reflector); reconstruction
+Q·R ≈ A to ~1e-13. Factors in place.
+
+Note: unlike `cholesky_llt!`, padding a power-of-two leading dimension does **not** help here — measured
+(2048: 0.49× padded vs 0.53× in-place, padding only adds copy cost). QR's large-`n` gap is algorithmic
+(the thin `nb`-deep dlarfb streams the trailing block ~n/nb times; non-gemm overhead dominates), not the
+`LDA=2^k` cache conflict that bottlenecks Cholesky's trsm/syrk. The core is split out as
+`_qr_blocked_core!(A, tau, mlog, nb)` (factors the leading `mlog×n`) so it only ever takes single-level
+`view`s of a `Matrix` — passing a nested `SubArray` (e.g. a padded view) crashes the Julia compiler.
+"""
+qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 8) =
+    _qr_blocked_core!(A, tau, size(A, 1), nb)
 
 end # module Factorizations

@@ -468,5 +468,17 @@ is the gap, and matching it means reproducing faer's engineering, not just its m
 QR is at parity/better through n=1024 (shipped); n≥2048 stays ~0.5× and closing it is deep
 faer-specific engineering with diminishing returns.**
 
+#### Does the Cholesky LDA=2^k fix transfer to QR? No (measured).
+
+After the Cholesky win, refactored `qr_blocked!` into `_qr_blocked_core!(A, tau, mlog, nb)` so it factors
+the leading `mlog×n` of a plain `Matrix` (single-level views only — passing a padded *view* specializes the
+kernels for a nested `SubArray` and **crashes the Julia compiler** in LLVM GC-lowering). With padding then
+working: **2048 = 0.49× padded vs 0.53× in-place — no improvement** (padding only adds copy cost; it
+slightly hurt 512/1024 too). So padding was reverted. **QR's large-`n` bottleneck is algorithmic
+(thin `nb`-deep dlarfb → the trailing block is streamed ~n/nb times; non-gemm overhead dominates), not the
+`LDA=2^k` cache conflict** that bottlenecks Cholesky's trsm/syrk. The two factorizations have different
+large-`n` limiters: Cholesky's was cache-aliasing (fixed by padding → beats faer everywhere); QR's is the
+flat-blocked structure (needs faer's in-place fused recursive backend, diminishing returns).
+
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
