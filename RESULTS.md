@@ -26,6 +26,45 @@ Date: 2026-06-22.
 | 4 | **rand + rand_distr** | Base `Random` stdlib (Xoshiro256++) | uniform 2.59×, normal 1.46×, exp 1.51× faster than Rust SmallRng; σ-clean (<3% both sides) | ☑ skip |
 | 4 | **argmin** | Optim.jl (LBFGS) | Optim.jl 23.4µs vs argmin 25.0µs/call (1.07×, σ-clean via batch+GC-control); iters comparable | ☑ skip |
 
+## ★ QR RESOLVED — pure-Julia beats faer at ALL sizes (512–2048, 1.05–1.19×)
+
+The QR gap (faer's last win) is **closed on `master`**. Two changes, both from the `faer-qr-mechanical`
+mechanical-port study, both validated by *measure-first*:
+
+1. **#1 — unpacked-B `W=VᵀC`** (`_qr_ukub_simd!`/`_qr_VtC_unpacked!`): faer's only real edge was a gemm
+   *orchestration choice* — `pack_rhs=false`: read the trailing `C` in place (NR column-streams the
+   prefetcher likes) instead of packing it (the ~mp·nt pack was the whole 58→73 GFLOP/s gap). A 48×4,
+   full-K, 24-accumulator microkernel does this. Alone: 2048 1.03×, but 512–1536 still <1.
+   **It needs no assembly** — pure SIMD.jl (LLVM) hits ~73, beating faer's hand-asm (70) *and* an inline-
+   asm version (71). The win is the orchestration, not the codegen.
+2. **#2 — vectorized `Y=TᵀW`**: profiling (the panel reduction is only 3–5% — *not* the bottleneck)
+   found the compact-WY `T` application was a **scalar** triangular loop. It has the same shape as
+   `W=VᵀC`, so it reuses the same kernel (zero `T` strict-lower, `Y=Tᵀ·W` reading `W` in place). This
+   flipped **all** sizes: 512 1.01–1.16×, 1024 1.08–1.19×, 1536 1.03–1.05×, 2048 1.10–1.16× (multi-trial,
+   recon ~1e-14). `C−=VY` (~45%, bandwidth-bound) is left on the packed-SIMD path — already near the
+   C-memory limit.
+
+### Verdict (carefully scoped — what this does and does *not* prove)
+
+**Defensible:** on this kernel (f64 QR, single-thread, Zen5), faer's speed advantage was a gemm
+**orchestration choice** (read the large operand in place), **not Rust, not LLVM, not the algorithm** — the
+faithful mechanical port of faer's *exact* algorithm also ran 0.88×, and pure idiomatic Julia (SIMD.jl →
+LLVM, no inline asm) implementing the same choice **matches/beats faer's hand-written assembly**. The
+performance **ceiling is the same** in both languages; the gap was algorithmic and fixable in Julia.
+
+**Caveat (not "all bit-for-bit"):** the deterministic kernels matched faer bit-for-bit — `norm_l2`
+(135/135), `make_householder` (90/90), the gemm accumulation order (57/57) — and the microkernel hits the
+same in-L1 peak. **But `inner_prod` (the dot) did *not* match** — its SIMD reduction order is
+LLVM-codegen-dependent and was not bit-reproducible (~1 ULP; brute-forced 34/54). So bit-exactness held
+everywhere *except* one SIMD reduction; "all bit-for-bit" would be false.
+
+**Do NOT generalize to "Julia is better than Rust for scientific computing."** This is one kernel, one
+shape, one machine, ~parity-to-+10%. It refutes "Rust is inherently faster here" and shows the languages
+share the same ceiling — it does **not** establish language superiority (which would also turn on
+ecosystem, genericity, autodiff, threading, dev velocity — none measured here). The honest headline is
+**parity/competitiveness**: pure Julia is *not slower* than a state-of-the-art Rust LA library, and where
+it lagged the cause was algorithmic, not linguistic. Cholesky beats everywhere; QR now beats at every n.
+
 ## The faer finding (the one gap)
 
 faer does **not** compete against Julia code — Julia's `LinearAlgebra` factorizations are thin
