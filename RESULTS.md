@@ -284,7 +284,29 @@ intensity tracked speed in lockstep — and the two misses it *couldn't* see (al
 residency in F14) became new feedback. The necessary-not-sufficient finding plus the new lever that
 *does* guide is a complete arc.
 
-### n≥512 — the practical ceiling (and why hand-packing isn't worth it)
+### Large-n packing prototype (`bench/probe_cholesky_packed.jl`) — reaches faer parity at n=2048
+
+Revisited the n≥512 ceiling with a **portable packed syrk** (GotoBLAS-style: pack `L10` into compact
+MR-row panels → unit-stride, cache-resident microkernel). Written generic — `W` from the host, the
+cache-block `MC` derived from the host **L2** at runtime, modest `MRV=2×NRB=4` tile (fits AVX2 too).
+Hybrid: pack only when the `L10` panel exceeds ~½ L2 (else the non-packed kernel's lower overhead wins).
+
+| n | non-packed (current) | **hybrid packed** | OpenBLAS | faer |
+|---|----------------------|-------------------|----------|------|
+| 256  | 1.05× | 1.02× (uses current) | 0.90× | 1.0 |
+| 512  | 0.73× | 0.73× (transition valley) | 0.82× | 1.0 |
+| 1024 | 0.88× | **0.92×** | 0.90× | 1.0 |
+| 2048 | 0.74× | **0.98× (parity, beats OpenBLAS)** | 0.96× | 1.0 |
+
+**Packing is the large-n lever** (it was the missing piece): it lifts 1024 to 0.92× and 2048 to parity,
+because past the cache-fit point the non-packed kernel is L2-bandwidth-bound and packing restores
+unit-stride L1-resident reuse. **n=512 is a genuine cache-transition valley** (~0.73×): `L10` (384 KB)
+still fits L2, so packing's overhead isn't repaid and the non-packed kernel's strided re-reads still
+cost — neither wins. The recipe (reusable for other projects): **cache-derived hybrid — small-n
+non-packed, large-n packed** — and it's portable (no machine-specific constants). Next refinements for
+512/very-large-n: NC-blocking of the B panel + software prefetch + a remainder-safe microkernel.
+
+### n≥512 — the earlier ceiling exploration (pre-packing)
 
 Pushed n=512 three more ways, all measured:
 - **i-outer cache blocking** (keep `L10[panel]` L1-resident): *regressed* (512 0.70→0.65×) — restructuring
