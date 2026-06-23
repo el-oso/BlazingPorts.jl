@@ -425,7 +425,26 @@ reduction efficient), then a single fat dlarfb (`pb=64` → ⅛ the C-traffic, *
 The `nb` sweep confirms the tradeoff (2048: `nb=16` best at 0.55×, bigger worse — our flat panel is
 rank-1; recursion is what makes large `nb` cheap). So the microkernel-is-at-peak finding transfers, but
 QR's large-`n` gap is a *blocking-structure* problem, not a packing one. (Status: parity ≤1024 shipped in
-`src`; the two-level driver for ≥2048 is the scoped next step.)
+`src`.)
+
+#### Recursive (Elmroth–Gustavson = faer's structure) — correct, but structure alone isn't enough (`bench/probe_qr_recursive.jl`, `probe_qr_rec_blas.jl`)
+
+Copied faer's recursive blocked QR faithfully: recurse left, fat dlarfb to the right, recurse right,
+combine `T₁₂ = −T₁₁(V₁ᵀV₂)T₂₂`. **Correct** (recon ~1e-15, incl. non-power-of-2). But:
+- With our register-tiled (non-cache-blocked) gemms it's *slower* (0.05×) — the fat `pb` makes those
+  kernels re-stream C `pb/NR` times (they're tuned for the small `pb=8` of the flat driver).
+- With **optimal single-thread BLAS gemms** it reaches only **0.50× at 2048 — no better than our flat
+  blocked (0.53×).** Why: faer's QR runs at ~54 GFLOP/s ≈ the dgemm ceiling (62); ours (flat *and*
+  recursive) at ~27. **Half our time is non-gemm overhead** — the E-G `T`-combine's extra `V₁ᵀV₂`
+  (≈ n³/8 flops), dense-`V` rebuilds, and the rank-1 leaf reduction.
+
+**Conclusion:** the recursive *structure* is necessary but not sufficient. faer's 2× edge at n=2048 is
+low-level implementation engineering (in-place/fused operation, minimal temporary traffic, its own tuned
+gemm), not the algorithm shape — copying the structure doesn't transfer the speed. This is the same
+lesson as the microkernel study, one level up: at the full-factorization level, *implementation overhead*
+is the gap, and matching it means reproducing faer's engineering, not just its math. **Practical verdict:
+QR is at parity/better through n=1024 (shipped); n≥2048 stays ~0.5× and closing it is deep
+faer-specific engineering with diminishing returns.**
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
