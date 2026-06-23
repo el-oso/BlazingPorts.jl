@@ -372,12 +372,34 @@ gemm (Octavian) for this syrk-in-Cholesky pattern.** So a hand-written BLIS pack
 | 512  | **0.75×** | 0.61× | 0.82× | 1.00 |
 | 1024 | **0.89×** | 0.64× | 0.91× | 1.00 |
 
-**Final verdict:** pure-Julia Cholesky **beats faer through n=256**, and is **0.75× (512) / 0.89×
-(1024)** — within ~10% of OpenBLAS and beating the pure-Julia packed gemm everywhere. The residual to
-faer at n≥512 is the gap between a good hand microkernel and a fully-tuned packed pipeline near hardware
-peak; closing it isn't reachable by the levers `kernel_report` can see, and the packed alternative
-(Octavian) underperforms us — so this is the practical ceiling. **The faer Cholesky gap is effectively
-closed** (parity/beat ≤256, ~0.8–0.9× beyond, best-in-class among pure-Julia options).
+**Final verdict (superseded below):** pure-Julia Cholesky beats faer through n=256, and *was* 0.75×/0.89×
+at 512/1024 — but see the LDA finding: those two sizes were slow for a fixable reason, not a ceiling.
+
+### 🎯 The 512/1024 gap was a power-of-2 leading-dimension cache conflict — FIXED (`cholesky_llt_padded!`)
+
+Decomposing the 512 factorization showed the **syrk at ~70 GFLOP/s (near peak) but the trsm at ~30** — and
+the trsm rate depended on the *leading dimension*: ld=512 → 30, ld=520 → 68 (syrk 58→74 likewise). At
+n=512/1024 the in-place matrix has `ld = n = 2^k`, which aliases consecutive columns into the same cache
+sets (classic `LDA=2^k` conflict). **Factoring in a padded buffer (ld+8) recovers 1.3–1.5× and now beats
+faer at every size:**
+
+| n | in-place (ld=2^k) | **padded** | faer |
+|---|-------------------|------------|------|
+| 512  | 0.73× | **~1.1× (1.5× faster than in-place)** | 1.00 |
+| 1024 | 0.88× | **~1.2× (1.34×)** | 1.00 |
+| 2048 | 0.74× | **~1.0–1.24× (1.38×)** | 1.00 |
+
+(Same-run in-place-vs-padded ratios are 1.49/1.34/1.38×; faer absolute times are thermally noisy, so the
+faer-relative column is best-of clean runs.) This is **the** lever for n≥512 — bigger and far simpler than
+packing (which only helped 2048 and not 512). faer/BLAS pad for exactly this reason.
+
+**API (one entry, always fast):** `cholesky_llt!(A)` auto-detects a power-of-two stride and factors in a
+padded scratch (else in place) — the caller just gets the fast result. For a hot loop, pass a
+preallocated **`CholWorkspace(n)`** — `cholesky_llt!(A, ws)` is then **allocation-free even on the padded
+path** (the no-alloc guarantee, verified by `@assert_noalloc`). The result is bit-identical regardless of
+`ld` (pure addressing). **The faer Cholesky gap is fully closed at all measured sizes once the LDA is not
+a power of two** — i.e. our kernels were never the problem; the earlier "ceiling" was a benchmarking
+artifact of factoring power-of-two matrices in place.
 
 ➡ Next (independent): **QR (Layer D)** via the same recipe.
 

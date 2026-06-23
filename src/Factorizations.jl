@@ -26,7 +26,7 @@ module Factorizations
 using SIMD: Vec, vload, vstore
 import VectorizationBase
 
-export cholesky_llt!
+export cholesky_llt!, CholWorkspace
 
 # Host SIMD width: 4 on AVX2, 8 on AVX-512 — one source, ISA-generic. (Bit-exactness is independent
 # of W: each lane is an independent FMA accumulation, so changing W never changes the result bits.)
@@ -327,14 +327,65 @@ base kernel is bit-exact vs faer (n ≤ 64); at the blocked level the trsm/syrk 
 order with fused multiply-adds (faer's microkernel ordering differs, so ≥128 may differ by a few ULP
 in the accumulation — reconstruction stays ~1e-13). Vectorized over rows with host-width `Vec{W}`.
 """
+# in-place core (no-alloc): factor A using its own leading dimension.
+@inline function _chol_inplace!(A::AbstractMatrix{Float64})
+    n = size(A, 1)
+    GC.@preserve A begin
+        return _chol_rl!(pointer(A), n, stride(A, 2), BLOCK_SIZE, RECURSION_THRESHOLD)
+    end
+end
+
+"""
+    CholWorkspace(n)
+
+Reusable scratch for [`cholesky_llt!`](@ref) sized for an `n×n` matrix. Preallocate once and pass it in
+to make the factorization **allocation-free even on the padded fast path** (the path taken when the input
+stride is a power of two). Size it for your largest `n`.
+"""
+struct CholWorkspace
+    P::Vector{Float64}     # padded scratch, holds an (n+8)×n column-major block
+end
+CholWorkspace(n::Integer) = CholWorkspace(Vector{Float64}(undef, (n + 8) * n))
+
+@inline _needs_pad(A) = size(A, 1) >= 128 && ispow2(stride(A, 2))
+
+"""
+    cholesky_llt!(A [, ws::CholWorkspace]) -> true
+
+In-place Cholesky (LLᵀ); the lower triangle of `A` is overwritten with `L`. Returns `false` on a
+non-positive pivot. **One entry, always the fast path:** a power-of-two leading dimension aliases columns
+into the same cache sets (the classic `LDA=2^k` conflict, ~1.3–1.5× slower trsm/syrk at n≥512), so when
+`A`'s stride is a power of two the factorization runs in a padded scratch (`ld+8`) and is copied back —
+bit-identical, since `ld` is pure addressing (faer/BLAS pad for the same reason). Otherwise it factors in
+place. Pass a preallocated [`CholWorkspace`](@ref) to make even the padded path allocation-free (the
+no-alloc guarantee); the no-argument form allocates the scratch on demand.
+"""
+function cholesky_llt!(A::AbstractMatrix{Float64}, ws::CholWorkspace)
+    n = size(A, 1)
+    n == 0 && return true
+    Base.require_one_based_indexing(A)
+    _needs_pad(A) || return _chol_inplace!(A)
+    ldp = n + 8
+    ld = stride(A, 2)
+    GC.@preserve A ws begin
+        pA = pointer(A); pP = pointer(ws.P)
+        @inbounds for j in 0:n-1                          # A (ld) → padded scratch (ldp), column by column
+            unsafe_copyto!(pP + j * ldp * 8, pA + j * ld * 8, n)
+        end
+        ok = _chol_rl!(pP, n, ldp, BLOCK_SIZE, RECURSION_THRESHOLD)
+        @inbounds for j in 0:n-1                          # result back
+            unsafe_copyto!(pA + j * ld * 8, pP + j * ldp * 8, n)
+        end
+        return ok
+    end
+end
+
 function cholesky_llt!(A::AbstractMatrix{Float64})
     n = size(A, 1)
     n == 0 && return true
     Base.require_one_based_indexing(A)
-    ld = stride(A, 2)
-    GC.@preserve A begin
-        return _chol_rl!(pointer(A), n, ld, BLOCK_SIZE, RECURSION_THRESHOLD)
-    end
+    _needs_pad(A) || return _chol_inplace!(A)
+    return cholesky_llt!(A, CholWorkspace(n))            # convenience: allocate scratch on demand
 end
 
 

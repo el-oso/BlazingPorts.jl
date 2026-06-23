@@ -55,6 +55,25 @@
     end
 end
 
+@testitem "cholesky_padded" tags = [:factorizations] begin
+    # cholesky_llt! auto-pads when the stride is a power of two (the fast path). The result must be
+    # BIT-IDENTICAL to factoring the same data in place at a non-pow2 stride (leading dimension is pure
+    # addressing — it never changes the FMA order or the bits). n=256 is pow2 (auto-pads); 257 is not.
+    import BlazingPorts.Factorizations as F
+    using BlazingPorts.Factorizations: cholesky_llt!
+    using LinearAlgebra
+    for n in (128, 256, 257)
+        M = randn(n, n); A = M'M + n * I
+        Aauto = Matrix(A)
+        @test cholesky_llt!(Aauto) === true                 # pow2 → padded path; else in-place
+        Pad = Matrix{Float64}(undef, n + 8, n); ref = view(Pad, 1:n, 1:n); copyto!(ref, A)
+        @test F._chol_inplace!(ref) === true                # in-place at non-pow2 stride (n+8)
+        bit = all(reinterpret(UInt64, Aauto[r, c]) === reinterpret(UInt64, ref[r, c]) for c in 1:n for r in c:n)
+        @test bit
+        @test isapprox(LowerTriangular(Aauto) * LowerTriangular(Aauto)', A; rtol = 1e-10)
+    end
+end
+
 @testitem "qr_golden" tags = [:qr] begin
     # Layer D-A: validates the QR golden harness WITHOUT any Julia QR implementation.
     # Reconstruction: apply Householder reflectors to R and verify Q*R ≈ A.
@@ -176,11 +195,18 @@ end
     using StrictMode, AllocCheck, JET
     using LinearAlgebra
 
-    A = Matrix(let M = randn(96, 96); M'M + 96I end)
-    cholesky_llt!(copy(A))  # warm
-    @assert_typestable cholesky_llt!(A)
-    @assert_noalloc cholesky_llt!(A)
-    @test (@allocated cholesky_llt!(A)) == 0
+    import BlazingPorts.Factorizations as F
+    using BlazingPorts.Factorizations: CholWorkspace
+    # With a preallocated workspace the padded fast path (pow2 stride) is allocation-free — the headline
+    # guarantee on the entry users call in a hot loop. (@allocated factors in place, so use fresh copies.)
+    A = Matrix(let M = randn(256, 256); M'M + 256I end)   # n=256 ⇒ pow2 stride ⇒ padded path
+    ws = CholWorkspace(256)
+    cholesky_llt!(copy(A), ws); F._chol_inplace!(copy(A))  # warm both entries (compile before @allocated)
+    @assert_typestable cholesky_llt!(A, ws)               # AllocCheck/JET are static — A state irrelevant
+    @assert_noalloc cholesky_llt!(A, ws)
+    B = copy(A); C = copy(A)                              # fresh SPD (each measured call factors in place)
+    @test (@allocated cholesky_llt!(B, ws)) == 0
+    @test (@allocated F._chol_inplace!(C)) == 0          # in-place core likewise alloc-free
 
     # Each hot kernel must vectorize to host-width <W x double> (base case, panel solve, rank-k update).
     GC.@preserve A begin
