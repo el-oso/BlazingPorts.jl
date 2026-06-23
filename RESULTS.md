@@ -321,18 +321,26 @@ golden to ~1e-15 at all n (non-bit-exact only from `norm_l2` ordering); reconstr
 - **D-A golden harness** ✅ — `qr_verify` dumps faer's packed QR + τ/T; reconstruction test.
 - **D-B unblocked Householder base kernel** (`qr_unblocked!`) ✅ — `Vec{W}`-vectorized; StrictMode
   `@assert_vectorized`+`@assert_noalloc`+`@assert_typestable` pass. **Beats faer at n=64 (1.59×).**
-- **D-C blocked compact-WY driver** (`qr_blocked!`) ✅ correct — panel reduction + dlarft `T` + trailing
-  update as gemms `C −= V·Tᵀ·(Vᵀ·C)`. *But not yet faster:* its dlarfb gemms are un-tiled, so they don't
-  beat the unblocked rank-1 updates.
+- **D-C blocked compact-WY driver** (`qr_blocked!`) ✅ — panel reduction + dlarft `T` + trailing update
+  as **tiled SIMD gemms**: `C −= V·Y` (syrk-style, MR=2×4) and `Vᵀ·C` (dot-form, 2c×4j). `nb=8`.
 
-QR perf vs faer (single-threaded): BP-unblocked 64 **1.59×**, 128 0.82×, 256 0.54×, 512 0.39×; BP-blocked
-similar/worse (un-tiled gemm). **Even OpenBLAS LAPACK is 0.67–0.80× faer** — faer's QR is exceptional,
-like its Cholesky.
+### ✅ QR PARITY — beats faer through n=256
 
-**Status:** QR ports are *correct & faithful* (match faer ~1e-15, unblocked beats faer small-n,
-StrictMode-clean). **QR perf parity needs the tiled-gemm marathon** applied to the dlarfb trailing update
-(`C −= V Y`, `Vᵀ C`) — the same register-block + aligned-triangular work that got Cholesky to beat faer.
-That's the clear next step; banked here as a complete correct-port checkpoint.
+The tiled-gemm marathon (the same one Cholesky took) landed: the levers were `nb=8` (large nb wastes
+time in rank-1 panel reduction), **MR=2 tile on `C−=VY`**, and the **2c×4j tile on `Vᵀ·C`** (the decisive
+one). Single-threaded vs faer:
+
+| n | BP-blocked | BP-unblocked | OpenBLAS | faer |
+|---|-----------|--------------|----------|------|
+| 64  | **1.19×** | 1.59× | 0.67× | 1.00 |
+| 128 | **1.03×** | 0.82× | 0.80× | 1.00 |
+| 256 | **1.12×** | 0.54× | 0.76× | 1.00 |
+| 512 | 0.87× | 0.39× | 0.67× | 1.00 |
+
+**Pure-Julia QR beats faer through n=256** (and beats OpenBLAS everywhere); n=512 at 0.87× (faer's QR is
+near-peak, like its Cholesky). Correct throughout (recon ~1e-14, matches faer's factors ~1e-15),
+StrictMode-clean. **Both faer factorization gaps (Cholesky + QR) are now closed in pure Julia through
+n=256.**
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.

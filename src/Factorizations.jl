@@ -434,6 +434,161 @@ function qr_unblocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64})
     return true
 end
 
+# dlarfb gemm 1: Wm[c,j] = Σ_i V[i,c]·C[i,j]  (V: mp×pb ld=mp; C: mp×nt ld=ldC; Wm: pb×nt ld=pb).
+# Dot-form: Vec-accumulate over contiguous rows i, reuse each V[:,c] chunk across NJ output columns,
+# horizontal-sum at the end.
+# 1-column dot helper (V[:,c]ᵀ C[:,j] for j in a 4-block or singly) — used for c-remainder.
+@inline function _qr_VtC_col!(pWm, pV, pC, c::Int, mp::Int, nt::Int, pb::Int, ldC::Int)
+    j = 1
+    @inbounds while j <= nt
+        s = Vec{W,Float64}(0.0); t = 0.0; i = 1
+        while i + W - 1 <= mp
+            s = muladd(vload(Vec{W,Float64}, _vptr(pV, i, c, mp)),
+                vload(Vec{W,Float64}, _vptr(pC, i, j, ldC)), s)
+            i += W
+        end
+        while i <= mp
+            t = muladd(unsafe_load(pV, _lidx(i, c, mp)), unsafe_load(pC, _lidx(i, j, ldC)), t); i += 1
+        end
+        unsafe_store!(pWm, sum(s) + t, _lidx(c, j, pb))
+        j += 1
+    end
+end
+
+function _qr_VtC!(pWm, pV, pC, mp::Int, nt::Int, pb::Int, ldC::Int)
+    c = 1
+    @inbounds while c + 1 <= pb                      # 2 c-rows × 4 j-cols = 8 dot accumulators
+        j = 1
+        while j + 3 <= nt
+            a0 = Vec{W,Float64}(0.0); a1 = Vec{W,Float64}(0.0); a2 = Vec{W,Float64}(0.0); a3 = Vec{W,Float64}(0.0)
+            b0 = Vec{W,Float64}(0.0); b1 = Vec{W,Float64}(0.0); b2 = Vec{W,Float64}(0.0); b3 = Vec{W,Float64}(0.0)
+            i = 1
+            while i + W - 1 <= mp
+                u0 = vload(Vec{W,Float64}, _vptr(pV, i, c, mp))
+                u1 = vload(Vec{W,Float64}, _vptr(pV, i, c + 1, mp))
+                w0 = vload(Vec{W,Float64}, _vptr(pC, i, j, ldC));     a0 = muladd(u0, w0, a0); b0 = muladd(u1, w0, b0)
+                w1 = vload(Vec{W,Float64}, _vptr(pC, i, j + 1, ldC)); a1 = muladd(u0, w1, a1); b1 = muladd(u1, w1, b1)
+                w2 = vload(Vec{W,Float64}, _vptr(pC, i, j + 2, ldC)); a2 = muladd(u0, w2, a2); b2 = muladd(u1, w2, b2)
+                w3 = vload(Vec{W,Float64}, _vptr(pC, i, j + 3, ldC)); a3 = muladd(u0, w3, a3); b3 = muladd(u1, w3, b3)
+                i += W
+            end
+            r0 = sum(a0); r1 = sum(a1); r2 = sum(a2); r3 = sum(a3)
+            q0 = sum(b0); q1 = sum(b1); q2 = sum(b2); q3 = sum(b3)
+            while i <= mp
+                x0 = unsafe_load(pV, _lidx(i, c, mp)); x1 = unsafe_load(pV, _lidx(i, c + 1, mp))
+                y0 = unsafe_load(pC, _lidx(i, j, ldC));     r0 = muladd(x0, y0, r0); q0 = muladd(x1, y0, q0)
+                y1 = unsafe_load(pC, _lidx(i, j + 1, ldC)); r1 = muladd(x0, y1, r1); q1 = muladd(x1, y1, q1)
+                y2 = unsafe_load(pC, _lidx(i, j + 2, ldC)); r2 = muladd(x0, y2, r2); q2 = muladd(x1, y2, q2)
+                y3 = unsafe_load(pC, _lidx(i, j + 3, ldC)); r3 = muladd(x0, y3, r3); q3 = muladd(x1, y3, q3)
+                i += 1
+            end
+            unsafe_store!(pWm, r0, _lidx(c, j, pb));     unsafe_store!(pWm, q0, _lidx(c + 1, j, pb))
+            unsafe_store!(pWm, r1, _lidx(c, j + 1, pb)); unsafe_store!(pWm, q1, _lidx(c + 1, j + 1, pb))
+            unsafe_store!(pWm, r2, _lidx(c, j + 2, pb)); unsafe_store!(pWm, q2, _lidx(c + 1, j + 2, pb))
+            unsafe_store!(pWm, r3, _lidx(c, j + 3, pb)); unsafe_store!(pWm, q3, _lidx(c + 1, j + 3, pb))
+            j += 4
+        end
+        while j <= nt                               # j-remainder for the 2 c-rows
+            a = Vec{W,Float64}(0.0); b = Vec{W,Float64}(0.0); i = 1
+            while i + W - 1 <= mp
+                wv = vload(Vec{W,Float64}, _vptr(pC, i, j, ldC))
+                a = muladd(vload(Vec{W,Float64}, _vptr(pV, i, c, mp)), wv, a)
+                b = muladd(vload(Vec{W,Float64}, _vptr(pV, i, c + 1, mp)), wv, b)
+                i += W
+            end
+            ra = sum(a); rb = sum(b)
+            while i <= mp
+                yy = unsafe_load(pC, _lidx(i, j, ldC))
+                ra = muladd(unsafe_load(pV, _lidx(i, c, mp)), yy, ra)
+                rb = muladd(unsafe_load(pV, _lidx(i, c + 1, mp)), yy, rb); i += 1
+            end
+            unsafe_store!(pWm, ra, _lidx(c, j, pb)); unsafe_store!(pWm, rb, _lidx(c + 1, j, pb))
+            j += 1
+        end
+        c += 2
+    end
+    @inbounds while c <= pb                          # c-remainder (single column)
+        _qr_VtC_col!(pWm, pV, pC, c, mp, nt, pb, ldC)
+        c += 1
+    end
+end
+
+# dlarfb gemm 2: C[i,j] -= Σ_c V[i,c]·Y[c,j]  (syrk-style: vectorize rows i, broadcast Y[c,j],
+# reuse each V[i,c] load across NR=4 output columns). C: mp×nt ld=ldC; V: mp×pb ld=mp; Y: pb×nt ld=pb.
+function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int)
+    j = 1
+    @inbounds while j + 3 <= nt
+        i = 1
+        while i + 2W - 1 <= mp                         # MR=2 × 4 cols = 8 accumulators
+            r1 = i + W
+            d00 = _vptr(pC, i, j, ldC);     A0 = vload(Vec{W,Float64}, d00)
+            e00 = _vptr(pC, r1, j, ldC);    B0 = vload(Vec{W,Float64}, e00)
+            d01 = _vptr(pC, i, j + 1, ldC); A1 = vload(Vec{W,Float64}, d01)
+            e01 = _vptr(pC, r1, j + 1, ldC); B1 = vload(Vec{W,Float64}, e01)
+            d02 = _vptr(pC, i, j + 2, ldC); A2 = vload(Vec{W,Float64}, d02)
+            e02 = _vptr(pC, r1, j + 2, ldC); B2 = vload(Vec{W,Float64}, e02)
+            d03 = _vptr(pC, i, j + 3, ldC); A3 = vload(Vec{W,Float64}, d03)
+            e03 = _vptr(pC, r1, j + 3, ldC); B3 = vload(Vec{W,Float64}, e03)
+            for c in 1:pb
+                u0 = vload(Vec{W,Float64}, _vptr(pV, i, c, mp))
+                u1 = vload(Vec{W,Float64}, _vptr(pV, r1, c, mp))
+                g0 = Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j, pb)));     A0 = muladd(g0, u0, A0); B0 = muladd(g0, u1, B0)
+                g1 = Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 1, pb))); A1 = muladd(g1, u0, A1); B1 = muladd(g1, u1, B1)
+                g2 = Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 2, pb))); A2 = muladd(g2, u0, A2); B2 = muladd(g2, u1, B2)
+                g3 = Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 3, pb))); A3 = muladd(g3, u0, A3); B3 = muladd(g3, u1, B3)
+            end
+            vstore(A0, d00); vstore(A1, d01); vstore(A2, d02); vstore(A3, d03)
+            vstore(B0, e00); vstore(B1, e01); vstore(B2, e02); vstore(B3, e03)
+            i += 2W
+        end
+        while i + W - 1 <= mp
+            b0 = _vptr(pC, i, j, ldC);     a0 = vload(Vec{W,Float64}, b0)
+            b1 = _vptr(pC, i, j + 1, ldC); a1 = vload(Vec{W,Float64}, b1)
+            b2 = _vptr(pC, i, j + 2, ldC); a2 = vload(Vec{W,Float64}, b2)
+            b3 = _vptr(pC, i, j + 3, ldC); a3 = vload(Vec{W,Float64}, b3)
+            for c in 1:pb
+                vic = vload(Vec{W,Float64}, _vptr(pV, i, c, mp))
+                a0 = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j, pb))), vic, a0)
+                a1 = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 1, pb))), vic, a1)
+                a2 = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 2, pb))), vic, a2)
+                a3 = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 3, pb))), vic, a3)
+            end
+            vstore(a0, b0); vstore(a1, b1); vstore(a2, b2); vstore(a3, b3)
+            i += W
+        end
+        while i <= mp
+            for dj in 0:3
+                s = unsafe_load(pC, _lidx(i, j + dj, ldC))
+                for c in 1:pb
+                    s = muladd(-unsafe_load(pV, _lidx(i, c, mp)), unsafe_load(pY, _lidx(c, j + dj, pb)), s)
+                end
+                unsafe_store!(pC, s, _lidx(i, j + dj, ldC))
+            end
+            i += 1
+        end
+        j += 4
+    end
+    @inbounds while j <= nt
+        i = 1
+        while i + W - 1 <= mp
+            b = _vptr(pC, i, j, ldC); a = vload(Vec{W,Float64}, b)
+            for c in 1:pb
+                a = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j, pb))),
+                    vload(Vec{W,Float64}, _vptr(pV, i, c, mp)), a)
+            end
+            vstore(a, b); i += W
+        end
+        while i <= mp
+            s = unsafe_load(pC, _lidx(i, j, ldC))
+            for c in 1:pb
+                s = muladd(-unsafe_load(pV, _lidx(i, c, mp)), unsafe_load(pY, _lidx(c, j, pb)), s)
+            end
+            unsafe_store!(pC, s, _lidx(i, j, ldC)); i += 1
+        end
+        j += 1
+    end
+end
+
 """
     qr_blocked!(A, tau; nb=32) -> true
 
@@ -443,8 +598,9 @@ with `λ_k = 1/tau_k` since faer's `H_k = I − v_k v_kᵀ/tau_k`), then applies
 **gemms** `C −= V·(Tᵀ·(Vᵀ·C))` instead of `nb` rank-1 updates — turning the trailing update compute-bound.
 `tau` follows the faer convention (`Inf` ⇒ identity reflector). Reconstruction Q·R ≈ A to ~1e-13.
 """
-function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 32)
+function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 8)
     m, n = size(A)
+    ld = stride(A, 2)
     k = min(m, n)
     pc = 1
     @inbounds while pc <= k
@@ -479,30 +635,20 @@ function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; n
                     end
                 end
             end
-            # trailing update C −= V · (Tᵀ · (Vᵀ · C)), C = A[pc:m, jt0:n]
-            C = view(A, pc:m, jt0:n)
-            Wm = zeros(pb, nt)                              # Wm = Vᵀ C
-            for j in 1:nt, c in 1:pb
-                s = 0.0
-                @simd for i in 1:mp
-                    s = muladd(V[i, c], C[i, j], s)
+            # trailing update C −= V · (Tᵀ · (Vᵀ · C)), C = A[pc:m, jt0:n], via tiled SIMD gemms.
+            Wm = Matrix{Float64}(undef, pb, nt)
+            Y = Matrix{Float64}(undef, pb, nt)
+            GC.@preserve A V Wm Y begin
+                pC = pointer(A, (jt0 - 1) * ld + pc)       # &A[pc, jt0]
+                _qr_VtC!(pointer(Wm), pointer(V), pC, mp, nt, pb, ld)   # Wm = Vᵀ C
+                for j in 1:nt, c in 1:pb                    # Y = Tᵀ Wm  (Tᵀ lower-tri; small)
+                    s = 0.0
+                    for r in 1:c
+                        s = muladd(T[r, c], Wm[r, j], s)
+                    end
+                    Y[c, j] = s
                 end
-                Wm[c, j] = s
-            end
-            Y = zeros(pb, nt)                               # Y = Tᵀ Wm  (Tᵀ lower-tri)
-            for j in 1:nt, c in 1:pb
-                s = 0.0
-                for r in 1:c
-                    s = muladd(T[r, c], Wm[r, j], s)
-                end
-                Y[c, j] = s
-            end
-            for j in 1:nt, c in 1:pb                        # C −= V Y
-                y = Y[c, j]
-                y == 0.0 && continue
-                @simd for i in 1:mp
-                    C[i, j] = muladd(-V[i, c], y, C[i, j])
-                end
+                _qr_subVY!(pC, pointer(V), pointer(Y), mp, nt, pb, ld)  # C −= V Y
             end
         end
         pc += pb
