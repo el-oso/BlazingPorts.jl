@@ -173,6 +173,31 @@ end
     end
 end
 
+@testitem "qr_2level" tags = [:qr] begin
+    # The n≥1536 two-level fat-panel fast path (with QRWorkspace + LDA padding). Exercises non-pow2
+    # (1600, in place) and pow2 (2048, padded scratch). Validate by reconstruction Q·R ≈ A.
+    using BlazingPorts.Factorizations: qr_blocked!, QRWorkspace
+    using LinearAlgebra
+    reconQR(A, tau, n) = begin
+        R = triu(A); Q = Matrix{Float64}(I, n, n)
+        for k in 1:n
+            t = tau[k]; isinf(t) && continue
+            v = [i == 1 ? 1.0 : A[k+i-1, k] for i in 1:(n - k + 1)]
+            Q[:, k:n] .-= (Q[:, k:n] * v) * v' ./ t
+        end
+        Q * R
+    end
+    for n in (1600, 2048)
+        A0 = randn(n, n); A = copy(A0); tau = zeros(n)
+        @test qr_blocked!(A, tau) === true                      # auto-selects two-level (n≥1536)
+        @test isapprox(reconQR(A, tau, n), A0; rtol = 1e-9)
+        # workspace method gives the same factorization
+        Aw = copy(A0); tw = zeros(n)
+        @test qr_blocked!(Aw, tw, QRWorkspace(n)) === true
+        @test isapprox(reconQR(Aw, tw, n), A0; rtol = 1e-9)
+    end
+end
+
 @testitem "qr_strictmode" tags = [:qr] begin
     # The QR base kernel must be vectorized, allocation-free, type-stable.
     using BlazingPorts.Factorizations: qr_unblocked!

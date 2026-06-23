@@ -508,9 +508,23 @@ larger NB regresses as the inner `ib=8` panel reduction's cost grows). But it st
 *regresses* 512/1024 (Octavian call overhead + the two-level's inner-reduction / `T`-build / dense-`V`-rebuild
 overhead). The residual ~20% is precisely faer's **fused, near-zero-overhead** backend (it reads `V` in
 place, fuses the panel reduction with the update, and uses its own tuned gemm) — not reachable by bolting a
-general gemm onto our two-level. **Honest result: QR-2048 narrowed 0.53→0.80×, not beaten.** Beating it
-needs a from-scratch fused cache-blocked dlarfb (read-`V`-from-`A` + preallocated + the tuned gemm in one
-pass) — i.e. reimplementing faer's QR backend. Verdict: real diminishing returns; left at 0.80×.
+general gemm onto our two-level.
+
+#### Shipped: two-level fat-panel QR with our own cache-blocked gemm (no Octavian)
+
+Implemented the two-level path **in `src`** (`qr_blocked!` auto-selects it for n≥1536; `QRWorkspace` for an
+alloc-free hot loop; LDA padding; `_qr_dlarfb!` cache-blocks the fat gemm — NC-column blocks so `C` stays in
+L2 for `W=VᵀC`, and MC-row blocks via a new `ldV` kernel param so the `V`-panel stays in L1 for `C−=VY`).
+No Octavian (it was only a throwaway test). Result: **QR-2048 = 0.53× → 0.73×** (correct, recon ~1e-14, 266
+tests; n≤1024 unchanged on the flat path).
+
+**Honest verdict: still does NOT beat faer at 2048 (0.73×).** Our cache-blocked gemm lands a bit under
+Octavian's (0.73 vs 0.80×), and even Octavian-quality caps the two-level at ~0.80× because of its
+*un-fused* overhead (separate panel reduction + `T` build + dense-`V` rebuild + a general gemm call). The
+last ~20–30% is faer's **fully-fused in-place backend**, which the two-level architecture cannot reach.
+That's a separate, larger project (a single fused cache-blocked dlarfb that reduces, builds `T`, and
+updates in one pass). **QR is beaten/parity through 1024 and improved to 0.73× at 2048; the 2048 beat
+remains open, gated on the fused backend — not on algorithm or codegen.**
 
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.

@@ -399,7 +399,7 @@ end
 # Layer D-C (done): qr_blocked!    — compact-WY blocked driver (panel reduction + gemm trailing update).
 # Golden: bench/rust_compare/qr_golden.txt (regen: cargo build --release --bin qr_verify > ../qr_golden.txt).
 
-export qr_unblocked!, qr_blocked!
+export qr_unblocked!, qr_blocked!, QRWorkspace
 
 """
     qr_unblocked!(A, tau) -> true
@@ -566,7 +566,7 @@ end
 
 # dlarfb gemm 2: C[i,j] -= Σ_c V[i,c]·Y[c,j]  (syrk-style: vectorize rows i, broadcast Y[c,j],
 # reuse each V[i,c] load across NR=4 output columns). C: mp×nt ld=ldC; V: mp×pb ld=mp; Y: pb×nt ld=pb.
-function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int)
+function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int, ldV::Int = mp)
     j = 1
     @inbounds while j + 3 <= nt
         i = 1
@@ -581,8 +581,8 @@ function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int)
             d03 = _vptr(pC, i, j + 3, ldC); A3 = vload(Vec{W,Float64}, d03)
             e03 = _vptr(pC, r1, j + 3, ldC); B3 = vload(Vec{W,Float64}, e03)
             for c in 1:pb
-                u0 = vload(Vec{W,Float64}, _vptr(pV, i, c, mp))
-                u1 = vload(Vec{W,Float64}, _vptr(pV, r1, c, mp))
+                u0 = vload(Vec{W,Float64}, _vptr(pV, i, c, ldV))
+                u1 = vload(Vec{W,Float64}, _vptr(pV, r1, c, ldV))
                 g0 = Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j, pb)));     A0 = muladd(g0, u0, A0); B0 = muladd(g0, u1, B0)
                 g1 = Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 1, pb))); A1 = muladd(g1, u0, A1); B1 = muladd(g1, u1, B1)
                 g2 = Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 2, pb))); A2 = muladd(g2, u0, A2); B2 = muladd(g2, u1, B2)
@@ -598,7 +598,7 @@ function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int)
             b2 = _vptr(pC, i, j + 2, ldC); a2 = vload(Vec{W,Float64}, b2)
             b3 = _vptr(pC, i, j + 3, ldC); a3 = vload(Vec{W,Float64}, b3)
             for c in 1:pb
-                vic = vload(Vec{W,Float64}, _vptr(pV, i, c, mp))
+                vic = vload(Vec{W,Float64}, _vptr(pV, i, c, ldV))
                 a0 = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j, pb))), vic, a0)
                 a1 = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 1, pb))), vic, a1)
                 a2 = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j + 2, pb))), vic, a2)
@@ -611,7 +611,7 @@ function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int)
             for dj in 0:3
                 s = unsafe_load(pC, _lidx(i, j + dj, ldC))
                 for c in 1:pb
-                    s = muladd(-unsafe_load(pV, _lidx(i, c, mp)), unsafe_load(pY, _lidx(c, j + dj, pb)), s)
+                    s = muladd(-unsafe_load(pV, _lidx(i, c, ldV)), unsafe_load(pY, _lidx(c, j + dj, pb)), s)
                 end
                 unsafe_store!(pC, s, _lidx(i, j + dj, ldC))
             end
@@ -625,14 +625,14 @@ function _qr_subVY!(pC, pV, pY, mp::Int, nt::Int, pb::Int, ldC::Int)
             b = _vptr(pC, i, j, ldC); a = vload(Vec{W,Float64}, b)
             for c in 1:pb
                 a = muladd(Vec{W,Float64}(-unsafe_load(pY, _lidx(c, j, pb))),
-                    vload(Vec{W,Float64}, _vptr(pV, i, c, mp)), a)
+                    vload(Vec{W,Float64}, _vptr(pV, i, c, ldV)), a)
             end
             vstore(a, b); i += W
         end
         while i <= mp
             s = unsafe_load(pC, _lidx(i, j, ldC))
             for c in 1:pb
-                s = muladd(-unsafe_load(pV, _lidx(i, c, mp)), unsafe_load(pY, _lidx(c, j, pb)), s)
+                s = muladd(-unsafe_load(pV, _lidx(i, c, ldV)), unsafe_load(pY, _lidx(c, j, pb)), s)
             end
             unsafe_store!(pC, s, _lidx(i, j, ldC)); i += 1
         end
@@ -717,7 +717,148 @@ Note: unlike `cholesky_llt!`, padding a power-of-two leading dimension does **no
 `_qr_blocked_core!(A, tau, mlog, nb)` (factors the leading `mlog×n`) so it only ever takes single-level
 `view`s of a `Matrix` — passing a nested `SubArray` (e.g. a padded view) crashes the Julia compiler.
 """
-qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 8) =
-    _qr_blocked_core!(A, tau, size(A, 1), nb)
+function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 8)
+    size(A, 2) >= QR_2LEVEL_MIN && return qr_blocked!(A, tau, QRWorkspace(size(A, 2)))  # fat two-level path
+    return _qr_blocked_core!(A, tau, size(A, 1), nb)                                     # flat (beats faer ≤1024)
+end
+
+# ── Two-level fat-panel QR (the n≥1536 fast path) ────────────────────────────────────────────────
+# The flat driver's trailing gemms have reduction depth nb=8 → memory-bound (the trailing block is
+# streamed ~n/nb times). The two-level driver reduces a fat NB-column panel (with the inner ib-blocked
+# QR) then applies ONE fat dlarfb (k=NB), turning the trailing update compute-bound. The fat dlarfb is
+# cache-blocked over NC trailing columns so the panel stays cache-resident across the kernels' reuse.
+
+const QR_NB = 64                    # outer panel width (measured optimum; larger regresses the inner reduction)
+const QR_2LEVEL_MIN = 1536          # below this the flat driver already beats faer
+
+# host-derived trailing-column block: keep a C-panel (mp×NC) within ~½ L2 so the kernels' reuse hits cache
+@inline function _qr_nc(mp::Int)
+    l2 = Int(VectorizationBase.cache_size(Val(2)))
+    nc = max(4, (l2 ÷ 2) ÷ (mp * 8))
+    (nc ÷ 4) * 4
+end
+
+# row block for C−=VY so the V-panel (MC×pb) stays L1-resident across the trailing columns
+@inline function _qr_mc(pb::Int)
+    l1 = Int(VectorizationBase.cache_size(Val(1)))
+    mc = max(W, (l1 ÷ 2) ÷ (pb * 8))
+    (mc ÷ W) * W
+end
+
+"""
+    QRWorkspace(n; NB=$QR_NB)
+
+Reusable scratch for the two-level `qr_blocked!` fast path (n ≥ $QR_2LEVEL_MIN). Preallocate once and pass
+it to `qr_blocked!(A, tau, ws)` for an allocation-free hot loop. Size for your largest `n`.
+"""
+struct QRWorkspace
+    V::Vector{Float64}   # dense panel buffer (≥ (n+8)×NB)
+    T::Vector{Float64}   # NB×NB
+    W::Vector{Float64}   # NB×n column-block scratch
+    Y::Vector{Float64}   # NB×n
+    w::Vector{Float64}   # NB
+    NB::Int
+end
+QRWorkspace(n::Integer; NB::Int = QR_NB) = QRWorkspace(
+    Vector{Float64}(undef, (n + 8) * NB), Vector{Float64}(undef, NB * NB),
+    Vector{Float64}(undef, NB * n), Vector{Float64}(undef, NB * n),
+    Vector{Float64}(undef, NB), NB)
+
+# fat compact-WY block reflector: C[c0:mlog, jc:jc+nt-1] −= V·(Tᵀ·(Vᵀ·C)), reflectors width pb at (c0,c0).
+# Builds dense V + T into ws, then applies in NC-column cache blocks via the tiled gemm kernels.
+function _qr_dlarfb!(pA::Ptr{Float64}, tau, c0::Int, pb::Int, jc::Int, nt::Int, mlog::Int, ld::Int, ws::QRWorkspace)
+    mp = mlog - c0 + 1
+    pV = pointer(ws.V); pT = pointer(ws.T); pW = pointer(ws.W); pY = pointer(ws.Y); pw = pointer(ws.w)
+    @inbounds for c in 1:pb, i in 1:mp                       # dense V (ld=mp) from A's unit-trapezoid
+        gi = c0 + i - 1; gc = c0 + c - 1
+        unsafe_store!(pV, gi == gc ? 1.0 : (gi > gc ? unsafe_load(pA, (gc - 1) * ld + gi) : 0.0), (c - 1) * mp + i)
+    end
+    @inbounds for c in 1:pb                                  # dlarft → T (ld=pb), λ=1/τ
+        tc = tau[c0 + c - 1]; λ = isfinite(tc) ? 1.0 / tc : 0.0
+        unsafe_store!(pT, λ, (c - 1) * pb + c)
+        if c > 1 && λ != 0.0
+            for k in 1:c-1
+                s = 0.0
+                for i in 1:mp; s = muladd(unsafe_load(pV, (k - 1) * mp + i), unsafe_load(pV, (c - 1) * mp + i), s); end
+                unsafe_store!(pw, s, k)
+            end
+            for r in 1:c-1
+                s = 0.0
+                for k in r:c-1; s = muladd(unsafe_load(pT, (k - 1) * pb + r), unsafe_load(pw, k), s); end
+                unsafe_store!(pT, -λ * s, (c - 1) * pb + r)
+            end
+        end
+    end
+    NC = _qr_nc(mp)
+    pCbase = pA + ((jc - 1) * ld + (c0 - 1)) * sizeof(Float64)
+    jb = 0
+    @inbounds while jb < nt
+        bc = min(NC, nt - jb)
+        pC = pCbase + jb * ld * sizeof(Float64)
+        _qr_VtC!(pW, pV, pC, mp, bc, pb, ld)                 # W = Vᵀ C_block
+        for j in 1:bc, c in 1:pb                             # Y = Tᵀ W
+            s = 0.0
+            for r in 1:c; s = muladd(unsafe_load(pT, (c - 1) * pb + r), unsafe_load(pW, (j - 1) * pb + r), s); end
+            unsafe_store!(pY, s, (j - 1) * pb + c)
+        end
+        MC = _qr_mc(pb)                                      # C_block −= V Y, MC-row-blocked (V-panel in L1)
+        rb = 0
+        while rb < mp
+            mr = min(MC, mp - rb)
+            _qr_subVY!(pC + rb * sizeof(Float64), pV + rb * sizeof(Float64), pY, mr, bc, pb, ld, mp)
+            rb += mr
+        end
+        jb += bc
+    end
+end
+
+# two-level driver: reduce each NB-wide panel with the inner ib-blocked QR, then ONE fat dlarfb.
+function _qr_2level_core!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}, mlog::Int, ws::QRWorkspace; ib::Int = 8)
+    NB = ws.NB
+    n = size(A, 2); ld = stride(A, 2); k = min(mlog, n)
+    GC.@preserve A ws begin
+        pA = pointer(A)
+        oc = 1
+        while oc <= k
+            ob = min(NB, k - oc + 1)
+            ic = oc
+            while ic < oc + ob                               # reduce the NB-panel (inner ib-blocked QR)
+                pb = min(ib, oc + ob - ic)
+                qr_unblocked!(view(A, ic:mlog, ic:ic+pb-1), view(tau, ic:ic+pb-1))
+                jt = ic + pb; jhi = oc + ob - 1
+                jt <= jhi && _qr_dlarfb!(pA, tau, ic, pb, jt, jhi - jt + 1, mlog, ld, ws)
+                ic += pb
+            end
+            jt0 = oc + ob                                    # fat outer dlarfb (k=ob) on the trailing block
+            jt0 <= n && _qr_dlarfb!(pA, tau, oc, ob, jt0, n - jt0 + 1, mlog, ld, ws)
+            oc += ob
+        end
+    end
+    return true
+end
+
+"""
+    qr_blocked!(A, tau, ws::QRWorkspace) -> true
+
+Two-level fat-panel QR (the n≥$QR_2LEVEL_MIN fast path), allocation-free given a preallocated
+[`QRWorkspace`](@ref). Pads a power-of-two leading dimension (the fat dlarfb gemm is ld-sensitive) by
+factoring in an `ld+8` scratch and copying back (bit-identical). The no-argument `qr_blocked!(A, tau)`
+auto-selects this path for large `n` and the flat driver otherwise.
+"""
+function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}, ws::QRWorkspace)
+    m, n = size(A)
+    if ispow2(stride(A, 2))
+        P = Matrix{Float64}(undef, m + 8, n)
+        @inbounds for j in 1:n, i in 1:m
+            P[i, j] = A[i, j]
+        end
+        ok = _qr_2level_core!(P, tau, m, ws)
+        @inbounds for j in 1:n, i in 1:m
+            A[i, j] = P[i, j]
+        end
+        return ok
+    end
+    return _qr_2level_core!(A, tau, m, ws)
+end
 
 end # module Factorizations
