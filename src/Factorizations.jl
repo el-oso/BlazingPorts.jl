@@ -947,10 +947,15 @@ function _qr_dlarfb!(pA::Ptr{Float64}, tau, c0::Int, pb::Int, jc::Int, nt::Int, 
             @inbounds for idx in 1:pb*nt; unsafe_store!(pW, 0.0, idx); end
             _pgemm!(pW, pb, pV, mp, pCbase, ld, pb, nt, mp, 1.0, pAp, pBp, true)    # W = Vᵀ C  (TN, packed)
         end
-        @inbounds for j in 1:nt, c in 1:pb                                          # Y = Tᵀ W
-            s = 0.0
-            for r in 1:c; s = muladd(unsafe_load(pT, (c - 1) * pb + r), unsafe_load(pW, (j - 1) * pb + r), s); end
-            unsafe_store!(pY, s, (j - 1) * pb + c)
+        if W == 8 && pb == 48                                                       # Y = Tᵀ W  (vectorized)
+            @inbounds for c in 1:pb, r in c+1:pb; unsafe_store!(pT, 0.0, (c - 1) * pb + r); end  # zero strict-lower
+            _qr_VtC_unpacked!(pY, pT, pb, pW, pb, pb, nt, pAp, pBp)                 # Y = Tᵀ·W (read W in place, K=pb)
+        else
+            @inbounds for j in 1:nt, c in 1:pb                                      # Y = Tᵀ W  (scalar)
+                s = 0.0
+                for r in 1:c; s = muladd(unsafe_load(pT, (c - 1) * pb + r), unsafe_load(pW, (j - 1) * pb + r), s); end
+                unsafe_store!(pY, s, (j - 1) * pb + c)
+            end
         end
         _pgemm!(pCbase, ld, pV, mp, pY, pb, mp, nt, pb, -1.0, pAp, pBp, false)      # C −= V Y  (NN)
     else                                                # inner panels: thin pb, small nt → direct kernels
