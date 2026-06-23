@@ -411,5 +411,21 @@ near-peak, like its Cholesky). Correct throughout (recon ~1e-14, matches faer's 
 StrictMode-clean. **Both faer factorization gaps (Cholesky + QR) are now closed in pure Julia through
 n=256.**
 
+#### QR at large n — packing does NOT transfer; the bottleneck is different (`bench/probe_qr_packed.jl`)
+
+Re-measured wider: **QR is at parity/better through n=1024** (256 1.17×, 512 1.07×, **1024 1.01×**), but
+**falls to 0.53× at 2048.** Applying the Cholesky lever (pack `V` in the dlarfb, cache-hybrid) only nudges
+2048 → 0.58×. **Why it doesn't transfer:** Cholesky's syrk has a *fat* reduction (`pb=block_size=128`) →
+compute-bound, so packing-`V` fixes the last stride and hits peak. QR's dlarfb reduction is *thin*
+(`pb=nb=8`, from the ≤512 parity push) → the trailing `C` is streamed ~`n/nb` times; at n=2048 that's
+~4 GB of `C` traffic (~half of faer's runtime). Packing `V` fixes `V`-access, **not the C-streaming
+traffic** — so it barely helps. **The real fix is two-level / recursive blocking** (faer's structure):
+reduce a *fat* outer panel (`nb≈64`) using `qr_blocked!` with a small inner `nb` (keeps the panel
+reduction efficient), then a single fat dlarfb (`pb=64` → ⅛ the C-traffic, *and* packing-`V` now pays).
+The `nb` sweep confirms the tradeoff (2048: `nb=16` best at 0.55×, bigger worse — our flat panel is
+rank-1; recursion is what makes large `nb` cheap). So the microkernel-is-at-peak finding transfers, but
+QR's large-`n` gap is a *blocking-structure* problem, not a packing one. (Status: parity ≤1024 shipped in
+`src`; the two-level driver for ≥2048 is the scoped next step.)
+
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
