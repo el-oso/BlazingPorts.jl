@@ -480,5 +480,24 @@ slightly hurt 512/1024 too). So padding was reverted. **QR's large-`n` bottlenec
 large-`n` limiters: Cholesky's was cache-aliasing (fixed by padding → beats faer everywhere); QR's is the
 flat-blocked structure (needs faer's in-place fused recursive backend, diminishing returns).
 
+#### Pinpointed: what we do differently at 2048, and why "doing the same" didn't close it
+
+Measured the dlarfb gemm `C(mp×nt) −= V(mp×k)·Y(k×nt)` vs reduction depth `k` (= panel width `nb`):
+`k=8` → **36 GFLOP/s** (memory-bound), `k=32–64` → **~68** (near peak). And the trailing block is streamed
+`n/k` times: **256× at k=8 vs 32× at k=64**. So our `nb=8` makes the trailing update both memory-bound and
+traffic-heavy; faer uses **fat panels** (`k≈64`) → compute-bound + 8× less traffic.
+
+Tried to "do the same" — fat panels three ways: recursive Elmroth–Gustavson, two-level (LAPACK `dgeqrf`
+structure), and two-level **+ padding**. **All three land at ~0.5× — none beat the flat driver.** The
+fat-gemm benefit is real but **negated by per-panel implementation overhead**: dense-`V` rebuilds (copying
+the trapezoid out of `A` each block), fresh `V`/`T`/`W`/`Y` allocations per dlarfb, and repeated `T`
+construction. faer realizes the fat-panel benefit with **near-zero overhead** (operates in place on `A`'s
+trapezoid, preallocated scratch, fused) — that engineering, not the block structure, is its 2× edge.
+
+**So closing QR-2048 needs the low-overhead backend, not a better algorithm:** (1) gemm microkernels that
+read `V` directly from `A`'s unit-trapezoid (no dense rebuild), (2) a preallocated workspace for `T`/`W`/`Y`,
+(3) the fat `k≈64` outer dlarfb. That's a substantial reimplementation of faer's engineering for one size
+class — genuine diminishing returns vs the rest of the campaign.
+
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
