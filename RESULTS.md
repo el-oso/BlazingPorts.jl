@@ -499,5 +499,18 @@ read `V` directly from `A`'s unit-trapezoid (no dense rebuild), (2) a preallocat
 (3) the fat `k≈64` outer dlarfb. That's a substantial reimplementation of faer's engineering for one size
 class — genuine diminishing returns vs the rest of the campaign.
 
+#### Pushing QR-2048: two-level + cache-blocked gemm → 0.80× (best achievable; still short of faer)
+
+Pinned the exact bottleneck of the fat-panel approach: at `pb=64` our `_qr_VtC!`/`_qr_subVY!` **re-read C/V
+~pb/2 times** (they're tuned for `pb=8`, not cache-blocked for large `pb`). Swapping the fat outer dlarfb
+to a **cache-blocked gemm (Octavian, pure-Julia BLIS)** lifted **2048 from 0.53× → 0.80×** (NB=64 optimal;
+larger NB regresses as the inner `ib=8` panel reduction's cost grows). But it stalls at **0.80×** and
+*regresses* 512/1024 (Octavian call overhead + the two-level's inner-reduction / `T`-build / dense-`V`-rebuild
+overhead). The residual ~20% is precisely faer's **fused, near-zero-overhead** backend (it reads `V` in
+place, fuses the panel reduction with the update, and uses its own tuned gemm) — not reachable by bolting a
+general gemm onto our two-level. **Honest result: QR-2048 narrowed 0.53→0.80×, not beaten.** Beating it
+needs a from-scratch fused cache-blocked dlarfb (read-`V`-from-`A` + preallocated + the tuned gemm in one
+pass) — i.e. reimplementing faer's QR backend. Verdict: real diminishing returns; left at 0.80×.
+
 For argmin: to get a σ-clean comparison, either use a zero-allocation Julia optimizer or call the
 BLAS-backed LBFGS with preallocated workspace to eliminate GC from the timed region.
