@@ -462,3 +462,27 @@ pub extern "C" fn bp_roaring_contains(ap: *const u32, an: usize, qp: *const u32,
     let q = unsafe { std::slice::from_raw_parts(qp, qn) };
     q.iter().filter(|&&x| r.contains(x)).count() as u64
 }
+
+// Handle-based roaring: build ONCE (Box), then time the operation only — separates structure-build
+// from set-algebra (the build-dominated all-in-one shims above were unfair: per-element insert is
+// roaring's worst build path, and BitSet pays a 12.5MB alloc on sparse).
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_build(p: *const u32, n: usize) -> *mut RoaringBitmap {
+    Box::into_raw(Box::new(rb_build(p, n)))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_free(h: *mut RoaringBitmap) { unsafe { drop(Box::from_raw(h)); } }
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_or_h(a: *const RoaringBitmap, b: *const RoaringBitmap) -> u64 {
+    unsafe { ((&*a) | (&*b)).len() }            // allocates the result bitmap (as BitSet union does)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_and_h(a: *const RoaringBitmap, b: *const RoaringBitmap) -> u64 {
+    unsafe { ((&*a) & (&*b)).len() }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_contains_h(a: *const RoaringBitmap, qp: *const u32, qn: usize) -> u64 {
+    let r = unsafe { &*a };
+    let q = unsafe { std::slice::from_raw_parts(qp, qn) };
+    q.iter().filter(|&&x| r.contains(x)).count() as u64
+}
