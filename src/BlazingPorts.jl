@@ -18,6 +18,7 @@ Submodules (one per crate family):
 - [`SmallMatrix`](@ref)     — Vec3/Vec4/Mat4 stack math (glam/nalgebra probe).
 - [`Factorizations`](@ref)  — faithful faer Cholesky port (faer probe, Layer B+C).
 - [`StringSearch`](@ref)    — SIMD substring search (memchr/memmem probe).
+- [`IntFormat`](@ref)       — branchless int→decimal formatting (itoa probe).
 """
 module BlazingPorts
 
@@ -26,11 +27,13 @@ include("SpecialFns.jl")
 include("MatrixMultiply.jl")
 include("Factorizations.jl")
 include("StringSearch.jl")
+include("IntFormat.jl")
 
 using .SmallMatrix
 using .SpecialFns
 using .MatrixMultiply
 using .Factorizations
 using .StringSearch
+using .IntFormat
 
 end # module BlazingPorts

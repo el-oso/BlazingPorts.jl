@@ -387,13 +387,18 @@ use std::hash::{Hash, Hasher, BuildHasher};
 pub extern "C" fn bp_itoa_len(data: *const i64, n: usize) -> usize {
     let xs = unsafe { std::slice::from_raw_parts(data, n) };
     let mut buf = itoa::Buffer::new();
-    xs.iter().map(|&x| buf.format(x).len()).sum()
+    // XOR-fold every output byte so the optimizer cannot DCE the digit-writing down to `len()`.
+    let mut acc = 0u8;
+    for &x in xs { for &b in buf.format(x).as_bytes() { acc ^= b; } }
+    acc as usize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn bp_ryu_len(data: *const f64, n: usize) -> usize {
     let xs = unsafe { std::slice::from_raw_parts(data, n) };
     let mut buf = ryu::Buffer::new();
-    xs.iter().map(|&x| buf.format(x).len()).sum()
+    let mut acc = 0u8;
+    for &x in xs { for &b in buf.format(x).as_bytes() { acc ^= b; } }
+    acc as usize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn bp_fxhash_sum(data: *const u64, n: usize) -> u64 {
@@ -412,4 +417,14 @@ pub extern "C" fn bp_hashbrown_roundtrip(data: *const u64, n: usize) -> u64 {
     let mut m: hashbrown::HashMap<u64, u64> = hashbrown::HashMap::with_capacity(n);
     for (i, &x) in xs.iter().enumerate() { m.insert(x, i as u64); }
     xs.iter().fold(0u64, |a, &x| a.wrapping_add(*m.get(&x).unwrap()))
+}
+
+// Format-only itoa: black_box forces the digit-writes (canonical DCE defeat), no readback/copy.
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_itoa_bb(data: *const i64, n: usize) -> usize {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    let mut buf = itoa::Buffer::new();
+    let mut acc = 0usize;
+    for &x in xs { acc += std::hint::black_box(buf.format(x)).len(); }
+    acc
 }
