@@ -428,3 +428,13 @@ pub extern "C" fn bp_itoa_bb(data: *const i64, n: usize) -> usize {
     for &x in xs { acc += std::hint::black_box(buf.format(x)).len(); }
     acc
 }
+
+// Format-only ryu: black_box forces the digit-writes (canonical DCE defeat), no readback.
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_ryu_bb(data: *const f64, n: usize) -> usize {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    let mut buf = ryu::Buffer::new();
+    let mut acc = 0usize;
+    for &x in xs { acc += std::hint::black_box(buf.format(x)).len(); }
+    acc
+}
