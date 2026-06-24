@@ -438,3 +438,27 @@ pub extern "C" fn bp_ryu_bb(data: *const f64, n: usize) -> usize {
     for &x in xs { acc += std::hint::black_box(buf.format(x)).len(); }
     acc
 }
+
+// ── roaring (Tier 2 GP): compressed bitsets. Build from u32 arrays; return a cardinality/count sink. ──
+use roaring::RoaringBitmap;
+#[inline]
+fn rb_build(p: *const u32, n: usize) -> RoaringBitmap {
+    let s = unsafe { std::slice::from_raw_parts(p, n) };
+    let mut r = RoaringBitmap::new();
+    for &x in s { r.insert(x); }
+    r
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_or(ap: *const u32, an: usize, bp: *const u32, bn: usize) -> u64 {
+    (rb_build(ap, an) | rb_build(bp, bn)).len()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_and(ap: *const u32, an: usize, bp: *const u32, bn: usize) -> u64 {
+    (rb_build(ap, an) & rb_build(bp, bn)).len()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_roaring_contains(ap: *const u32, an: usize, qp: *const u32, qn: usize) -> u64 {
+    let r = rb_build(ap, an);
+    let q = unsafe { std::slice::from_raw_parts(qp, qn) };
+    q.iter().filter(|&&x| r.contains(x)).count() as u64
+}
