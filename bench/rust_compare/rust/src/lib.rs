@@ -367,3 +367,16 @@ pub extern "C" fn argmin_lbfgs_rosenbrock(out: *mut c_double, batch: usize) -> c
     o[0] = last_p[0]; o[1] = last_p[1];
     last_iters as c_double
 }
+
+// ── memchr (Tier 1 GP): SIMD byte / substring search. Return index or -1. ──────────────────────────
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_memchr(haystack: *const u8, len: usize, needle: u8) -> isize {
+    let h = unsafe { std::slice::from_raw_parts(haystack, len) };
+    match memchr::memchr(needle, h) { Some(i) => i as isize, None => -1 }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_memmem(haystack: *const u8, hlen: usize, needle: *const u8, nlen: usize) -> isize {
+    let h = unsafe { std::slice::from_raw_parts(haystack, hlen) };
+    let n = unsafe { std::slice::from_raw_parts(needle, nlen) };
+    match memchr::memmem::find(h, n) { Some(i) => i as isize, None => -1 }
+}

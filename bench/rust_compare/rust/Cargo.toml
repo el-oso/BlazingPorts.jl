@@ -28,6 +28,7 @@ rand = { version = "0.9", features = ["small_rng"] }  # Xoshiro256++ SmallRng (T
 rand_distr = "0.5"        # StandardNormal, Exp1 samplers (Tier 4)
 argmin = "0.11"           # generic optimizer: L-BFGS (Tier 4)
 argmin-math = { version = "0.5", features = ["vec"] }  # argmin trait impls for Vec<f64>
+memchr = "2"              # SIMD byte/substring search (Tier 1 GP)
 
 [profile.release]
 opt-level = 3
