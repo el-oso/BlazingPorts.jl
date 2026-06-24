@@ -29,6 +29,11 @@ rand_distr = "0.5"        # StandardNormal, Exp1 samplers (Tier 4)
 argmin = "0.11"           # generic optimizer: L-BFGS (Tier 4)
 argmin-math = { version = "0.5", features = ["vec"] }  # argmin trait impls for Vec<f64>
 memchr = "2"              # SIMD byte/substring search (Tier 1 GP)
+itoa = "1"                # int → string (Tier 1 GP)
+ryu = "1"                 # float → string (Tier 1 GP)
+rustc-hash = "2"          # FxHasher fast integer hash (Tier 1 GP)
+ahash = "0.8"             # AES-NI hashing (Tier 1 GP)
+hashbrown = "0.15"        # SwissTable hash map (Tier 2 GP)
 
 [profile.release]
 opt-level = 3

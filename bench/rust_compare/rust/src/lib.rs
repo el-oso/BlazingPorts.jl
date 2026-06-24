@@ -380,3 +380,36 @@ pub extern "C" fn bp_memmem(haystack: *const u8, hlen: usize, needle: *const u8,
     let n = unsafe { std::slice::from_raw_parts(needle, nlen) };
     match memchr::memmem::find(h, n) { Some(i) => i as isize, None => -1 }
 }
+
+// ── Tier 1/2 GP probes: int/float formatting + hashing + hashmap. Batched over N to amortize ccall. ──
+use std::hash::{Hash, Hasher, BuildHasher};
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_itoa_len(data: *const i64, n: usize) -> usize {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    let mut buf = itoa::Buffer::new();
+    xs.iter().map(|&x| buf.format(x).len()).sum()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_ryu_len(data: *const f64, n: usize) -> usize {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    let mut buf = ryu::Buffer::new();
+    xs.iter().map(|&x| buf.format(x).len()).sum()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_fxhash_sum(data: *const u64, n: usize) -> u64 {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    xs.iter().fold(0u64, |a, &x| { let mut h = rustc_hash::FxHasher::default(); x.hash(&mut h); a ^ h.finish() })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_ahash_sum(data: *const u64, n: usize) -> u64 {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    let s = ahash::RandomState::with_seeds(1, 2, 3, 4);
+    xs.iter().fold(0u64, |a, &x| { let mut h = s.build_hasher(); x.hash(&mut h); a ^ h.finish() })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hashbrown_roundtrip(data: *const u64, n: usize) -> u64 {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    let mut m: hashbrown::HashMap<u64, u64> = hashbrown::HashMap::with_capacity(n);
+    for (i, &x) in xs.iter().enumerate() { m.insert(x, i as u64); }
+    xs.iter().fold(0u64, |a, &x| a.wrapping_add(*m.get(&x).unwrap()))
+}
