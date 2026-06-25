@@ -719,17 +719,22 @@ Note: unlike `cholesky_llt!`, padding a power-of-two leading dimension does **no
 """
 function qr_blocked!(A::AbstractMatrix{Float64}, tau::AbstractVector{Float64}; nb::Int = 8)
     size(A, 2) >= QR_2LEVEL_MIN && return qr_blocked!(A, tau, QRWorkspace(size(A, 2)))  # fat two-level path
-    return _qr_blocked_core!(A, tau, size(A, 1), nb)                                     # flat (beats faer ≤1024)
+    return _qr_blocked_core!(A, tau, size(A, 1), nb)                                     # flat (best at small n, e.g. 256)
 end
 
-# ── Two-level fat-panel QR (the n≥1536 fast path) ────────────────────────────────────────────────
+# ── Two-level fat-panel QR (the n≥QR_2LEVEL_MIN fast path) ───────────────────────────────────────
 # The flat driver's trailing gemms have reduction depth nb=8 → memory-bound (the trailing block is
 # streamed ~n/nb times). The two-level driver reduces a fat NB-column panel (with the inner ib-blocked
 # QR) then applies ONE fat dlarfb (k=NB), turning the trailing update compute-bound. The fat dlarfb is
 # cache-blocked over NC trailing columns so the panel stays cache-resident across the kernels' reuse.
 
 const QR_NB = 48                    # outer panel width (measured optimum with the packed fat dlarfb)
-const QR_2LEVEL_MIN = 1536          # below this the flat driver already beats faer
+# n≥512 ⇒ two-level fat-panel driver. Measured (pinned 4.5 GHz, median over 3 runs, ours/faer): the flat
+# nb=8 driver wins only at n=256 (1.15×); at n≥512 its thin trailing update goes memory-bound and it loses
+# /ties faer (512 ~1.08× but noisy, 1024 0.97–1.06×). The two-level driver's fat dlarfb (unpacked-B SIMD
+# gemm) is compute-bound and beats faer robustly at every n≥512 (512 1.18×, 1024 1.12×, 2048 1.13×). So
+# 256 stays flat (its best), 512+ goes two-level — Julia beats faer at ALL benchmarked sizes.
+const QR_2LEVEL_MIN = 512
 
 # ── packed BLIS gemm for the fat outer dlarfb (pack A→GMRW-panels, B→GNR-panels; 3-level MC/KC/NC) ──
 # The non-packed kernels are memory-bound on the fat (pb≈48) W=VᵀC; this packed gemm reaches ~peak.
