@@ -34,10 +34,29 @@ end
 end
 rs_bump(n) = @ccall LIB.bp_bumpalo_alloc3(n::Csize_t)::UInt64
 
-@assert bumper_alloc(N) == vec_arena(N) == naive_heap(N) == rs_bump(N)   # correctness (same checksum)
-ns(b) = median(b).time * 1e9 / N
-al(f) = @allocated f(N)
-@printf("bumpalo (Rust)     %.2f ns/obj\n",                  ns(@be rs_bump(N)     seconds=3))
-@printf("Bumper.jl          %.2f ns/obj   %d alloc/call\n",  ns(@be bumper_alloc(N) seconds=3), al(bumper_alloc))
-@printf("Vector{T} arena    %.2f ns/obj   %.1f MB/call\n",   ns(@be vec_arena(N)   seconds=3), al(vec_arena)/2^20)
-@printf("naive heap (M3)    %.2f ns/obj   %.1f MB/call\n",   ns(@be naive_heap(N)  seconds=3), al(naive_heap)/2^20)
+# Bumper doing N INDIVIDUAL bumps (apples-to-apples with bumpalo's per-object alloc, vs the array idiom).
+@noinline function bumper_indiv(n)
+    acc = UInt64(0)
+    @no_escape begin
+        @inbounds for i in 1:n
+            p = @alloc(T3, 1); u = UInt64(i - 1); p[1] = T3(u, u * 2, u * 3)
+            t = p[1]; acc ⊻= t.a ⊻ t.b ⊻ t.c
+        end
+    end
+    acc
+end
+
+# SIZE SWEEP — the single-N=1M number was memory-bandwidth-bound (a trivial tie). The allocator only
+# shows at cache-resident sizes; at DRAM scale it's bandwidth → parity. CAVEAT: the bumpalo shim has a
+# `black_box` barrier per object (DCE defense) that Bumper lacks, so Bumper's small-N edge is partly a
+# measurement asymmetry. The un-confounded result is the ALLOC COUNT: Bumper = 0 GC alloc/call at every
+# size (true zero-GC slab reuse, even at 1+ GB). naive per-object heap is the contrast (~13× + GC).
+nsp(b, n) = median(b).time * 1e9 / n
+for n in (1_000, 100_000, 1_000_000, 10_000_000, 50_000_000)
+    @assert bumper_alloc(n) == bumper_indiv(n) == rs_bump(n)
+    @printf("N=%9d (%6.1f MB)  bumpalo %.2f  Bumper-indiv %.2f  Bumper-array %.2f ns/obj   Bumper alloc=%d B\n",
+        n, n * 24 / 2^20, nsp(@be(rs_bump(n), seconds=2), n), nsp(@be(bumper_indiv(n), seconds=2), n),
+        nsp(@be(bumper_alloc(n), seconds=2), n), @allocated bumper_alloc(n))
+end
+@printf("naive heap (M3) @1M  %.2f ns/obj   %.1f MB/call (GC; what arenas avoid)\n",
+    nsp(@be(naive_heap(1_000_000), seconds=2), 1_000_000), (@allocated naive_heap(1_000_000)) / 2^20)
