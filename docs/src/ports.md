@@ -29,38 +29,60 @@ The famous "8.7× gap" was a **dead-code-elimination artifact** — the Rust shi
 
 ![itoa: ours vs the crate](assets/itoa.png)
 
-## blake3 → `Blake3` — ⏳ kernel beats the crate; full pipeline 0.82–0.92×
+## blake3 → `Blake3` — ✅ beats every compiler (incl. Rust); loses only to bundled hand-asm
 
-`Blake3Hash.jl` (the pure-Julia ecosystem package) is scalar — 0.085× the crate. We ported a
-`Vec{16,UInt32}` AVX-512 `hash_many`, byte-exact on the official BLAKE3 test vectors **and** against the
-crate across the SIMD/reduce path (super-group boundaries, remainders, partial chunks).
+This one taught us the most, so it gets the long version. `Blake3Hash.jl` (the pure-Julia ecosystem
+package) is scalar — 0.085× the crate. We ported a `Vec{16,UInt32}` AVX-512 `hash_many`, byte-exact on the
+official BLAKE3 test vectors **and** against the crate across the whole SIMD path (super-group boundaries,
+remainders, partial chunks).
 
-- **The compress kernel *beats* the crate — 1.04–1.05×** (pass-1-only, 7.5 vs 7.2 GB/s, single-thread).
-  This is the headline: pure SIMD.jl, no assembly, **out-runs `blake3`'s hand-written AVX-512 on the
-  hot kernel** — the "language is not the gap" thesis, measured. The earlier docs claimed the compress
-  was the bottleneck; direct measurement disproved it.
-- **The gap is the tree-reduce orchestration**, not the kernel. The chunk-CV reduction was running at
-  *narrowing* SIMD width (8→4→2→1 lanes). Rewriting it to a **full-width (lane = batch) cross-batch
-  reduction** — buffer 16 chunk-batches, transpose so lane = batch, run the parent tree 16-wide, fold
-  each 256-chunk super-group to one mega-root — cut the orchestration from ~20% to ~8–12% and lifted the
-  full pipeline from 0.88× to **0.92× (16 MiB)** / **0.82× (1 MiB**, where the crate is L2-resident and
-  most tuned). Byte-exact; per-call `malloc` removed.
-- **Remaining gap — proven to be scheduling, not algorithm.** The reduce costs ~6.5% on L1-hot data but
-  ~14% at 16 MiB. A faithful **recursive wide-stack reduction** (the crate's `compress_subtree` structure:
-  L1-hot 32-chunk groups, 16-wide deinterleave combine) was built and verified byte-exact vs the crate at
-  every size — and measured **identical** throughput (0.925× vs 0.930×). So the residual is *not* cache
-  eviction or the reduce structure; it's that the reduce runs as a phase **distinct** from compress, fully
-  exposed. The crate's last ~5% is fine-grained **interleaving of compress and reduce** across vector ports
-  — a scheduling/codegen edge of hand-tuned asm that LLVM won't emit across the `@noinline` kernel calls.
-  The kernel itself (the part LLVM *does* control) already beats the crate.
-- **Why even the kernel can't go faster — the register file.** The G-mixing has ~48% port headroom
-  (pure-G 8-way ILP is 1.48× a 4-way), but a fused/wider kernel can't use it: one batch's 16 message + 16
-  state vectors already fill all **32 AVX-512 registers**, so an 8-way (2-batch) leaf spills and runs
-  *slower* (0.96×, verified byte-exact). The crate hits the identical 32-register wall — which is exactly
-  why pure SIMD.jl ties/beats its hand asm. The ~0.92× pipeline is a **hardware register-pressure ceiling**,
-  not algorithm or codegen.
+BLAKE3 has two phases: a 16-wide SIMD **compress** (≈94% of the work) and a small tree **reduce**. The
+compress is where throughput is decided.
 
-![blake3: ours vs the crate](assets/blake3.png)
+![BLAKE3 two phases](assets/blake3_pipeline.svg)
+
+### The three-way measurement (this is the real finding)
+
+We built a shim that calls blake3's *own* code with a selectable backend, and benchmarked our kernel
+head-to-head against it — compress-only, 16 MiB, single-thread, same hardware:
+
+![BLAKE3 compress: Julia vs Rust vs hand-asm](assets/blake3_kernels.png)
+
+| | GB/s | what it is |
+|---|---|---|
+| **Julia `SIMD.jl` → LLVM, AVX-512 16-wide** | **7.46** | our kernel — pure Julia, no assembly |
+| blake3 pure-Rust (`rust_avx2` → LLVM, 8-wide) | 4.68 | the best **the Rust compiler** produces |
+| blake3 hand-written assembly (`.S`, AVX-512) | 8.36 | a hand-tuned `.S` file the crate bundles |
+
+The result that matters: **at the language level — LLVM vs LLVM — Julia wins, 1.60×.** blake3 has *no*
+pure-Rust AVX-512 path (there is no `rust_avx512.rs`; AVX-512 in blake3 is **assembly only**), so without
+its bundled `.S` the crate falls back to 8-wide AVX2 and loses to our 16-wide. **"The safe language Rust"
+isn't beating us — a hand-written assembly file is**, and that asm out-runs what *either* language's
+compiler emits by 13%.
+
+### Why the assembly is 13% faster — and why no compiler closes it
+
+![Register file: why hand-asm wins](assets/blake3_registers.svg)
+
+The compress kernel fills **all 32 AVX-512 registers** (16 hash-state + 16 message words). We measured it
+directly with `code_native`: 32/32 zmm used, 53 spills — *register-saturated*. The tree-reduce is the same
+G-mixing; to hide it inside the compress's spare execution-port slots you'd need free registers, and there
+are none. Hand-asm packs the 32 by hand and interleaves the reduce; LLVM greedily spends all 32 on the
+compress's ILP and runs the reduce as a separate, exposed phase. We exhausted the alternatives to be sure:
+a faithful **recursive wide-stack reduction** (the crate's `compress_subtree` structure) is byte-exact and
+**identical** speed (0.925× vs 0.930×); an **8-way fused leaf** needs 64 registers, spills, and is *slower*
+(0.96×). It's not the algorithm, the cache, or the language — it's LLVM's register scheduling vs hand-asm,
+**the same wall Rust hits** (which is why blake3 ships a `.S` to get around it).
+
+### We chose to stay pure Julia — no assembly
+
+We even hand-wrote our own AVX-512 `.S` to confirm the ceiling is reachable from Julia (it is — `ccall`
+into asm hits 8.36). But our from-scratch attempt, with every line verified against the spec, still had a
+subtle byte-exact bug — the perfect illustration of asm's cost. So the decision: **stay pure SIMD.jl, no
+assembly.** Correct-by-construction, ~87% of hand-asm, and **faster than every compiler including Rust's**.
+The last 13% is buyable only with hand-scheduled assembly and the fragility that comes with it — not a
+trade we make. (The asm experiment lives on the `blake3-handasm` branch.) Reproduce the whole comparison:
+`bench/probe_blake3_kernels.jl` (3-way kernel proof) and `bench/probe_blake3.jl` (full pipeline).
 
 ## hashbrown → `SwissDict` — ⚖️ a fundamental trade-off
 

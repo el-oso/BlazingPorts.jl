@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <style>
+    .ttl{font-size:18px;font-weight:700;fill:#222}
+    .lbl{font-size:13px;fill:#222}
+    .sub{font-size:11px;fill:#555}
+    .big{font-size:14px;font-weight:700;fill:#fff}
+    .tag{font-size:12px;font-weight:700}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;fill:#333}
+  </style>
+  <text x="20" y="30" class="ttl">How BLAKE3 hashes — two phases</text>
+
+  <!-- input -->
+  <rect x="20" y="70" width="120" height="80" rx="8" fill="#eef2f7" stroke="#9aa7b5"/>
+  <text x="80" y="105" text-anchor="middle" class="lbl">input bytes</text>
+  <text x="80" y="124" text-anchor="middle" class="sub">(e.g. 16 MiB)</text>
+  <path d="M140 110 h36" stroke="#888" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- chunks -->
+  <rect x="176" y="70" width="110" height="80" rx="8" fill="#eef2f7" stroke="#9aa7b5"/>
+  <text x="231" y="100" text-anchor="middle" class="lbl">split into</text>
+  <text x="231" y="118" text-anchor="middle" class="lbl">1 KiB chunks</text>
+  <text x="231" y="136" text-anchor="middle" class="sub">16 at a time</text>
+  <path d="M286 110 h36" stroke="#888" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- COMPRESS (the kernel) -->
+  <rect x="322" y="55" width="270" height="110" rx="10" fill="#2e8b57" stroke="#1c5d39"/>
+  <text x="457" y="86" text-anchor="middle" class="big">PHASE 1 · COMPRESS</text>
+  <text x="457" y="108" text-anchor="middle" fill="#eafff2" class="lbl">16 chunks in parallel (SIMD)</text>
+  <text x="457" y="127" text-anchor="middle" fill="#eafff2" class="sub">7-round G-mix × 16 blocks/chunk → 16 chaining values</text>
+  <text x="457" y="148" text-anchor="middle" fill="#cdeedb" class="mono">&lt;16 x i32&gt; AVX-512 · this is ~94% of the work</text>
+  <path d="M592 110 h36" stroke="#888" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- chunk CVs -->
+  <rect x="628" y="70" width="92" height="80" rx="8" fill="#eef2f7" stroke="#9aa7b5"/>
+  <text x="674" y="105" text-anchor="middle" class="lbl">16 chunk</text>
+  <text x="674" y="123" text-anchor="middle" class="lbl">CVs</text>
+  <path d="M720 110 h26" stroke="#888" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- REDUCE -->
+  <rect x="746" y="55" width="134" height="110" rx="10" fill="#708090" stroke="#4a5764"/>
+  <text x="813" y="86" text-anchor="middle" class="big">PHASE 2</text>
+  <text x="813" y="104" text-anchor="middle" class="big">REDUCE</text>
+  <text x="813" y="126" text-anchor="middle" fill="#eef2f7" class="sub">combine CVs</text>
+  <text x="813" y="142" text-anchor="middle" fill="#eef2f7" class="sub">up a tree → root</text>
+
+  <!-- tree sketch under reduce -->
+  <g stroke="#9aa7b5" stroke-width="1.5" fill="none">
+    <path d="M766 200 l12 -14 M790 200 l-12 -14 M802 200 l12 -14 M826 200 l-12 -14 M778 186 l16 -14 M810 186 l-16 -14"/>
+  </g>
+  <circle cx="794" cy="172" r="5" fill="#708090"/>
+  <text x="794" y="220" text-anchor="middle" class="sub">~6% of the work</text>
+
+  <!-- takeaway band -->
+  <rect x="20" y="272" width="860" height="146" rx="10" fill="#fbfcfe" stroke="#d6dde6"/>
+  <text x="38" y="300" class="tag" fill="#2e8b57">PHASE 1 (compress) is where throughput is decided. Pure Julia (SIMD.jl, 16-wide AVX-512) runs it at 7.46 GB/s:</text>
+  <circle cx="44" cy="326" r="3" fill="#2e8b57"/>
+  <text x="56" y="331" class="lbl">beats pure-Rust 1.60×  (Rust's compiler path is AVX2-only, 8-wide → 4.68 GB/s)</text>
+  <circle cx="44" cy="352" r="3" fill="#708090"/>
+  <text x="56" y="357" class="lbl">trails hand-written assembly by 13%  (8.36 GB/s) — see the register diagram for why</text>
+  <text x="38" y="394" class="sub" fill="#555">Compress and reduce are the same G-mixing kernel; the reduce is small, so PHASE 1 dominates throughput.</text>
+
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6 z" fill="#888"/></marker></defs>
+</svg>

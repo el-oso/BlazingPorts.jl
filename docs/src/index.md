@@ -17,7 +17,7 @@ fundamental trade-off. Every result below is single-threaded (`julia -t 1`, `tas
 | **faer** Cholesky | `Factorizations` (ours) | **beats faer every size 256–2048** (1.17–1.53×) | ✅ **Beats** |
 | **faer** QR | `Factorizations` (ours) | **beats faer every size 256–2048** (1.03–1.15×) | ✅ **Beats** |
 | **hashbrown** | `SwissDict <: AbstractDict` (ours) | miss **2.5× faster**, hit 0.55× | ⚖️ **Trade-off** |
-| **blake3** | `Blake3` (ours) | **compress kernel beats crate 1.04×**; full pipeline 0.82–0.92× (reduce-bound); 7.4× over Julia ecosystem | ⏳ kernel wins, pipeline optimizing |
+| **blake3** | `Blake3` (ours) | **compress beats pure-Rust 1.60×** (LLVM vs LLVM); trails the crate's bundled hand-asm 13%; 7.4× over Julia ecosystem | ✅ **Beats Rust** (pure Julia, no asm) |
 | **ryu** | `Base.Ryu.writeshortest` | 0.76–2.05× (value-dependent) | ⏭ Skip — Base ships it |
 | **roaring** | `Base.BitSet` | value-dependent (membership wins) | ⏭ Skip |
 | **bumpalo** | `Bumper.jl` | parity + true zero-GC | ⏭ Skip — ecosystem has it |

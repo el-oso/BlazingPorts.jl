@@ -1,7 +1,9 @@
 # Proposal (SIMD.jl): interleaving independent SIMD pipelines across the `@noinline` barrier
 
-**Status:** draft proposal, to pursue later. Motivated by BlazingPorts.jl's BLAKE3 (`src/Blake3.jl`).
-**Reproducer:** `bench/probe_blake3.jl`, `bench/blake3_*` scratch probes.
+**Status:** ⛔ **RESOLVED — no SIMD.jl feature would help (see "Final resolution" at the bottom).** The
+actionable output became a *StrictMode* diagnostic (`register_report`, F31), not a SIMD.jl feature. Kept as
+a documented ceiling. Motivated by BlazingPorts.jl's BLAKE3 (`src/Blake3.jl`).
+**Reproducer:** `bench/probe_blake3_kernels.jl` (3-way), `bench/probe_blake3.jl` (full pipeline).
 
 ## The finding that motivates this
 
@@ -85,3 +87,34 @@ file — hardware, not SIMD.jl. Kept as an honest negative result.
 `BlazingPorts.jl/bench/probe_blake3.jl` (full pipeline vs crate) plus the scratch decomposition probes
 (leaf-only 1.06×, reduce-isolated 6.5%, at-scale reduce 14%, wide-stack byte-exact + equal-perf). Any
 `@simd_fuse` prototype can be A/B'd directly against these numbers.
+
+## Final resolution (2026-06-25) — measured to ground truth, no SIMD.jl feature applies
+
+The original premise (fuse compress+reduce so LLVM schedules them together) was disproven, and the *whole*
+question was then settled by benchmarking our kernel directly against blake3's own backends (the
+`bp_blake3_hashmany` shim calls `blake3::platform::Platform::{AVX512,AVX2}` — its real asm and its real
+Rust). Compress-only, 16 MiB, single-thread:
+
+| | GB/s | what |
+|---|---|---|
+| **Julia SIMD.jl → LLVM, AVX-512 16-wide** | **7.46** | ours |
+| blake3 pure-Rust `rust_avx2` → LLVM, 8-wide | 4.68 | the Rust *compiler*'s best (no `rust_avx512` exists) |
+| blake3 hand-asm `.S`, AVX-512 16-wide | 8.36 | a bundled assembly file |
+
+Conclusions, all measured:
+1. **SIMD.jl already wins the language comparison — 1.60× over LLVM-compiled Rust.** There is nothing to
+   propose here: Julia→LLVM beats Rust→LLVM outright (Rust has no AVX-512 path *in the language*; blake3
+   ships `.S`).
+2. **The 13% gap to hand-asm is LLVM register-scheduling, which SIMD.jl cannot change.** The kernel is
+   register-saturated (32/32 zmm, 53 spills); the asm hand-packs registers to overlap the reduce, LLVM
+   won't, and a fused kernel needs 64 zmm → spills. No `@simd_fuse`/permute/anything in SIMD.jl alters
+   register allocation. Rust hits the identical wall.
+3. **The one genuinely useful artifact is a diagnostic, and it landed in StrictMode, not SIMD.jl:**
+   `register_report(f, types)` (StrictMode F31) reads `code_native` and reports SIMD-register count +
+   spills — turning "this kernel is register-saturated ⇒ you are at the portable-compiler ceiling" into an
+   automatic finding instead of a manual asm grep.
+
+So this proposal is closed as a **documented ceiling**, not a feature request: pure SIMD.jl reaches
+~85–87% of hand-written assembly on register-saturated kernels and beats every compiler; the residual is
+hardware (32 registers) + LLVM scheduling, unreachable from any portable IR. The minor cross-lane-permute
+nicety (Option B) is the only thing that remains a plausible SIMD.jl PR, and it is not on the critical path.

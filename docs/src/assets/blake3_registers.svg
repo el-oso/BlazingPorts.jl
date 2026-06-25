@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+  <style>
+    .ttl{font-size:18px;font-weight:700;fill:#222}
+    .h{font-size:13px;font-weight:700;fill:#222}
+    .lbl{font-size:12px;fill:#222}
+    .sub{font-size:11px;fill:#555}
+    .tag{font-size:11px;font-weight:700;fill:#fff}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px}
+  </style>
+  <text x="20" y="30" class="ttl">Why hand-asm beats LLVM by 13% — the register file</text>
+
+  <!-- register file: 32 slots, all full -->
+  <text x="20" y="62" class="h">The 32 AVX-512 registers (zmm0–zmm31) — the compress kernel fills every one:</text>
+  <g>
+    <!-- 16 state -->
+    <g>
+      <rect x="20" y="74" width="416" height="34" rx="5" fill="#2e8b57" opacity="0.18" stroke="#2e8b57"/>
+    </g>
+    <!-- 16 message -->
+    <rect x="444" y="74" width="416" height="34" rx="5" fill="#3b6ea5" opacity="0.18" stroke="#3b6ea5"/>
+  </g>
+  <g font-family="ui-monospace,monospace" font-size="10">
+    <!-- 32 little cells -->
+    <g fill="#2e8b57">
+      <!-- state cells -->
+    </g>
+  </g>
+  <!-- draw 32 cells -->
+  <g>
+    <!-- helper rows done explicitly -->
+    <!-- state 0..15 -->
+    <g>
+      <rect x="26"  y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="51"  y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+      <rect x="77"  y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="102" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+      <rect x="128" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="153" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+      <rect x="179" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="204" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+      <rect x="230" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="255" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+      <rect x="281" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="306" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+      <rect x="332" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="357" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+      <rect x="383" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="408" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
+    </g>
+    <!-- message 16..31 -->
+    <g>
+      <rect x="450" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="475" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+      <rect x="501" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="526" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+      <rect x="552" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="577" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+      <rect x="603" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="628" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+      <rect x="654" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="679" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+      <rect x="705" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="730" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+      <rect x="756" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="781" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+      <rect x="807" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="832" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
+    </g>
+  </g>
+  <text x="228" y="123" text-anchor="middle" class="sub"><tspan fill="#2e8b57" font-weight="700">16 = hash state</tspan></text>
+  <text x="652" y="123" text-anchor="middle" class="sub"><tspan fill="#3b6ea5" font-weight="700">16 = message words</tspan></text>
+  <text x="440" y="146" text-anchor="middle" class="lbl" font-weight="700">→ 0 registers free. The tree-reduce (also G-mixing) has nowhere to run.</text>
+
+  <!-- timelines -->
+  <text x="20" y="190" class="h">So how do you fit the reduce?</text>
+
+  <!-- LLVM -->
+  <text x="20" y="222" class="lbl" font-weight="700">Julia / LLVM  (and pure-Rust — same compiler):</text>
+  <rect x="20" y="232" width="470" height="40" rx="6" fill="#2e8b57"/>
+  <text x="255" y="257" text-anchor="middle" class="tag">COMPRESS  (uses all 32 registers)</text>
+  <rect x="500" y="232" width="200" height="40" rx="6" fill="#c0392b"/>
+  <text x="600" y="257" text-anchor="middle" class="tag">then REDUCE (exposed)</text>
+  <text x="715" y="257" class="sub">serial → ≈ the 13%</text>
+
+  <!-- asm -->
+  <text x="20" y="312" class="lbl" font-weight="700">blake3 hand-written assembly:</text>
+  <rect x="20" y="322" width="680" height="40" rx="6" fill="#708090"/>
+  <text x="360" y="347" text-anchor="middle" class="tag">COMPRESS  +  REDUCE interleaved into the spare slots  (reduce hidden ≈ free)</text>
+  <!-- little interleave ticks -->
+  <g stroke="#c0392b" stroke-width="3" opacity="0.7">
+    <line x1="90" y1="324" x2="90" y2="360"/><line x1="200" y1="324" x2="200" y2="360"/>
+    <line x1="330" y1="324" x2="330" y2="360"/><line x1="460" y1="324" x2="460" y2="360"/>
+    <line x1="590" y1="324" x2="590" y2="360"/>
+  </g>
+
+  <!-- takeaway -->
+  <rect x="20" y="388" width="840" height="98" rx="10" fill="#fbfcfe" stroke="#d6dde6"/>
+  <text x="38" y="414" class="h">The overlap is the entire 13% — and it requires hand-scheduling 32 registers, which no compiler does.</text>
+  <text x="38" y="437" class="lbl">LLVM greedily fills all 32 registers for the compress's instruction-level parallelism, leaving no room to</text>
+  <text x="38" y="456" class="lbl">interleave the reduce. Hand-asm packs them by hand. (We tried — a fused kernel needs 64 registers → spills → slower.)</text>
+  <text x="38" y="478" class="sub" fill="#2e8b57" font-weight="700">We chose to stay pure Julia: correct-by-construction, 87% of hand-asm, and faster than every compiler (incl. Rust).</text>
+</svg>

@@ -533,6 +533,35 @@ pub extern "C" fn bp_blake3_chunks_scalar(data: *const u8, n_chunks: usize, out:
     dst.copy_from_slice(&acc);
 }
 
+/// COMPRESS-ONLY via blake3's own platform `hash_many` — selectable backend, so we can benchmark our
+/// LLVM kernel against the crate's REAL hand-written asm and against its pure-Rust intrinsics path:
+///   which=0 → AVX512 (hand-written assembly, blake3_hash_many_avx512.S)
+///   which=1 → AVX2   (rust_avx2.rs, Rust std::arch intrinsics → LLVM, 8-wide; the best PURE-RUST path)
+///   other  → detect()
+/// Hashes n_chunks independent 1024-byte chunks (16 blocks each), XORs the CVs. No tree reduce.
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_blake3_hashmany(data: *const u8, n_chunks: usize, out: *mut u8, which: u32) {
+    use blake3::platform::Platform;
+    use blake3::IncrementCounter;
+    let slice = unsafe { std::slice::from_raw_parts(data, n_chunks * 1024) };
+    let plat = match which {
+        0 => Platform::AVX512,
+        1 => Platform::AVX2,
+        _ => Platform::detect(),
+    };
+    const IV: &[u32; 8] = &[0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+                            0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];
+    let inputs: Vec<&[u8; 1024]> = (0..n_chunks)
+        .map(|i| <&[u8; 1024]>::try_from(&slice[i * 1024..(i + 1) * 1024]).unwrap())
+        .collect();
+    let mut cvs = vec![0u8; n_chunks * 32];
+    // flags_start=CHUNK_START(1), flags_end=CHUNK_END(2): each input hashed as a full chunk CV.
+    plat.hash_many::<1024>(&inputs, IV, 0, IncrementCounter::Yes, 0, 1, 2, &mut cvs);
+    let mut acc = [0u8; 32];
+    for i in 0..n_chunks { for j in 0..32 { acc[j] ^= cvs[i * 32 + j]; } }
+    unsafe { std::slice::from_raw_parts_mut(out, 32).copy_from_slice(&acc); }
+}
+
 /// SIMD compress+reduce, NO root: hash the whole input as one subtree via the hazmat finalize_non_root
 /// (the crate's SIMD hash_many pipeline, minus the final root compress). Compare to bp_blake3 (with root)
 /// to confirm the root cost is negligible, and to our full pipeline. `n` must be a power-of-two multiple
