@@ -19,6 +19,7 @@ Submodules (one per crate family):
 - [`Factorizations`](@ref)  — faithful faer Cholesky port (faer probe, Layer B+C).
 - [`StringSearch`](@ref)    — SIMD substring search (memchr/memmem probe).
 - [`IntFormat`](@ref)       — branchless int→decimal formatting (itoa probe).
+- [`SwissDict`](@ref)       — SIMD group-probe hashmap (hashbrown probe).
 """
 module BlazingPorts
 
@@ -28,6 +29,7 @@ include("MatrixMultiply.jl")
 include("Factorizations.jl")
 include("StringSearch.jl")
 include("IntFormat.jl")
+include("SwissDict.jl")
 
 using .SmallMatrix
 using .SpecialFns
@@ -35,5 +37,6 @@ using .MatrixMultiply
 using .Factorizations
 using .StringSearch
 using .IntFormat
+using .SwissDict
 
 end # module BlazingPorts
