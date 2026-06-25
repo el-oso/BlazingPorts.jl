@@ -486,3 +486,18 @@ pub extern "C" fn bp_roaring_contains_h(a: *const RoaringBitmap, qp: *const u32,
     let q = unsafe { std::slice::from_raw_parts(qp, qn) };
     q.iter().filter(|&&x| r.contains(x)).count() as u64
 }
+
+// ── bumpalo (Tier 2 GP): bump/arena allocator. Allocate N 24-byte objects, touch them (black_box so
+// the allocs aren't DCE'd — F25). Returns a checksum sink. Times arena-create + N allocs + touch.
+use bumpalo::Bump;
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_bumpalo_alloc3(n: usize) -> u64 {
+    let bump = Bump::new();
+    let mut acc = 0u64;
+    for i in 0..n as u64 {
+        let p: &mut [u64; 3] = bump.alloc([i, i.wrapping_mul(2), i.wrapping_mul(3)]);
+        let q = std::hint::black_box(&*p);
+        acc ^= q[0] ^ q[1] ^ q[2];
+    }
+    acc
+}

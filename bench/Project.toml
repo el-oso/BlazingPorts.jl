@@ -1,6 +1,7 @@
 [deps]
 AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
 BlazingPorts = "6a76645a-1c79-4c35-96ac-450b50bde595"
+Bumper = "8ce10254-0962-460f-a3d8-1f77fea1446e"
 CPUSummary = "2a0fbf3d-bb9c-48f3-b0a9-814d99fd7ab9"
 Chairmarks = "0ca39b1e-fe0b-4e98-acfc-b1656634c4de"
 FastCholesky = "2d5283b6-8564-42b6-bb00-83ed8e915756"
