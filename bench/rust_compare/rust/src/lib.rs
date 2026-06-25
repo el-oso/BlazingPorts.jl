@@ -502,6 +502,20 @@ pub extern "C" fn bp_bumpalo_alloc3(n: usize) -> u64 {
     acc
 }
 
+// ── blake3 (Tier 3 GP): SIMD tree hashing. Single-thread, no rayon. ─────────────────────────────
+// Default features disable rayon; we explicitly build with default-features = false to be sure.
+// The Hasher::update / finalize path is entirely single-threaded.
+
+/// Hash `n` bytes at `data` into the 32-byte BLAKE3 digest at `out`.
+/// Single-threaded (no rayon). DCE-safe: `out` is an externally-visible side-effect.
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_blake3(data: *const u8, n: usize, out: *mut u8) {
+    let slice = unsafe { std::slice::from_raw_parts(data, n) };
+    let hash = blake3::hash(slice);
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, 32) };
+    dst.copy_from_slice(hash.as_bytes());
+}
+
 // Handle-based hashbrown: build the map ONCE, time each op on the handle (the build-included
 // bp_hashbrown_roundtrip was build-dominated, and compared with_capacity vs a no-sizehint Julia Dict).
 type HbMap = hashbrown::HashMap<u64, u64>;

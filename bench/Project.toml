@@ -1,5 +1,6 @@
 [deps]
 AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
+Blake3Hash = "8f478455-a32d-4928-b0e4-72b19a7d5574"
 BlazingPorts = "6a76645a-1c79-4c35-96ac-450b50bde595"
 Bumper = "8ce10254-0962-460f-a3d8-1f77fea1446e"
 CPUSummary = "2a0fbf3d-bb9c-48f3-b0a9-814d99fd7ab9"
