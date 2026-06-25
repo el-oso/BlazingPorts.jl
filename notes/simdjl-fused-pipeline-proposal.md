@@ -65,6 +65,22 @@ level** — the remaining gap is purely the inability to schedule independent SI
 Julia's inlining boundary. A `@simd_fuse`-style construct would close it here and generalise to any
 "compute-then-reduce" SIMD pipeline (hashing, FFT butterflies, blocked GEMM tail updates, etc.).
 
+## Update (2026-06-25): the limit is the register file, not scheduling
+
+We tried the concrete fusion — an **8-way leaf** (2 batches, 8 independent `_g4` chains interleaved per
+half-round). Verified byte-exact. Result: **0.959× — slower, not faster.** A pure-G microbench (minimal
+state) showed 8-way is 1.48× faster than 4-way, i.e. the vector *ports* have ~48% headroom. But the real
+compress carries 16 message + 16 state `Vec{16,UInt32}` = **32 zmm per batch — the entire AVX-512 register
+file**. Two batches = 64 zmm ⇒ heavy spills that erase the ILP gain.
+
+**Conclusion:** the kernel is **register-bound at 4-way**, not port-bound and not scheduling-bound. A
+`@simd_fuse` construct would not help BLAKE3, because fusing compress+reduce needs more live state than 32
+registers hold. The crate is under the identical constraint — which is *why* our 4-way SIMD.jl kernel
+already matches/beats its hand asm. So Option A above is **moot for register-saturated kernels** like this
+one; it would only help fusions whose combined working set still fits in registers. Option B (cross-lane
+permute) remains a minor independent nicety. The real, immovable ceiling here is the 32×512-bit register
+file — hardware, not SIMD.jl. Kept as an honest negative result.
+
 ## Test harness
 `BlazingPorts.jl/bench/probe_blake3.jl` (full pipeline vs crate) plus the scratch decomposition probes
 (leaf-only 1.06×, reduce-isolated 6.5%, at-scale reduce 14%, wide-stack byte-exact + equal-perf). Any

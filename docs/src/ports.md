@@ -53,6 +53,12 @@ crate across the SIMD/reduce path (super-group boundaries, remainders, partial c
   exposed. The crate's last ~5% is fine-grained **interleaving of compress and reduce** across vector ports
   — a scheduling/codegen edge of hand-tuned asm that LLVM won't emit across the `@noinline` kernel calls.
   The kernel itself (the part LLVM *does* control) already beats the crate.
+- **Why even the kernel can't go faster — the register file.** The G-mixing has ~48% port headroom
+  (pure-G 8-way ILP is 1.48× a 4-way), but a fused/wider kernel can't use it: one batch's 16 message + 16
+  state vectors already fill all **32 AVX-512 registers**, so an 8-way (2-batch) leaf spills and runs
+  *slower* (0.96×, verified byte-exact). The crate hits the identical 32-register wall — which is exactly
+  why pure SIMD.jl ties/beats its hand asm. The ~0.92× pipeline is a **hardware register-pressure ceiling**,
+  not algorithm or codegen.
 
 ![blake3: ours vs the crate](assets/blake3.png)
 
