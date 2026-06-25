@@ -45,8 +45,14 @@ crate across the SIMD/reduce path (super-group boundaries, remainders, partial c
   each 256-chunk super-group to one mega-root — cut the orchestration from ~20% to ~8–12% and lifted the
   full pipeline from 0.88× to **0.92× (16 MiB)** / **0.82× (1 MiB**, where the crate is L2-resident and
   most tuned). Byte-exact; per-call `malloc` removed.
-- **Remaining gap:** the residual is the transpose + parent-reduce overhead inherent to this structure.
-  Closing it to ≥0.96 needs the crate's recursive cache-blocked subtree reduction (`compress_subtree`).
+- **Remaining gap — proven to be scheduling, not algorithm.** The reduce costs ~6.5% on L1-hot data but
+  ~14% at 16 MiB. A faithful **recursive wide-stack reduction** (the crate's `compress_subtree` structure:
+  L1-hot 32-chunk groups, 16-wide deinterleave combine) was built and verified byte-exact vs the crate at
+  every size — and measured **identical** throughput (0.925× vs 0.930×). So the residual is *not* cache
+  eviction or the reduce structure; it's that the reduce runs as a phase **distinct** from compress, fully
+  exposed. The crate's last ~5% is fine-grained **interleaving of compress and reduce** across vector ports
+  — a scheduling/codegen edge of hand-tuned asm that LLVM won't emit across the `@noinline` kernel calls.
+  The kernel itself (the part LLVM *does* control) already beats the crate.
 
 ![blake3: ours vs the crate](assets/blake3.png)
 

@@ -788,8 +788,10 @@ function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
     n_super = n_batches ÷ 16
     rem_batches = n_batches % 16
     # one super-group's leaf CVs: bufp[b*8+w]. Fixed 8 KiB via Libc.malloc (no per-call GC alloc → the
-    # small-input timing was GC-noisy with a Julia Vector here).
-    bufp = Ptr{Vec{16,UInt32}}(Libc.malloc(16 * 8 * sizeof(Vec{16,UInt32})))
+    # small-input timing was GC-noisy with a Julia Vector here). 64-byte aligned so the AVX-512 stores
+    # (leaf) and loads (transpose) are aligned moves, not split unaligned ones.
+    rawbuf = Libc.malloc(16 * 8 * sizeof(Vec{16,UInt32}) + 63)
+    bufp = Ptr{Vec{16,UInt32}}((UInt(rawbuf) + 63) & ~UInt(63))
     # super-groups of 16 batches → 16-wide tree reduce
     for sg in 0:n_super-1
         @inbounds for b in 0:15
@@ -803,7 +805,7 @@ function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
         end
         stack_len = _reduce_supergroup!(cv_stack, stack_len, bufp, UInt64(sg))
     end
-    Libc.free(bufp)
+    Libc.free(rawbuf)
 
     # remainder (< 16) batches: per-batch narrowing reduce (small fraction of any large input)
     let p_rem = p + n_super * 16 * (N * CHUNK_LEN)
