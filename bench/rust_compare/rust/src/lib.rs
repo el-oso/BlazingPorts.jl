@@ -516,6 +516,36 @@ pub extern "C" fn bp_blake3(data: *const u8, n: usize, out: *mut u8) {
     dst.copy_from_slice(hash.as_bytes());
 }
 
+/// COMPRESS-ONLY (scalar): hash each 1024-byte chunk independently via guts::ChunkState (no tree, no
+/// root), XOR the CVs. ChunkState is the crate's SCALAR per-chunk compress (a single chunk can't use the
+/// SIMD hash_many path). Isolates the crate's scalar chunk-compress throughput for kernel comparison.
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_blake3_chunks_scalar(data: *const u8, n_chunks: usize, out: *mut u8) {
+    let slice = unsafe { std::slice::from_raw_parts(data, n_chunks * 1024) };
+    let mut acc = [0u8; 32];
+    for i in 0..n_chunks {
+        let mut cs = blake3::guts::ChunkState::new(i as u64);
+        cs.update(&slice[i * 1024..(i + 1) * 1024]);
+        let b = *cs.finalize(false).as_bytes();
+        for j in 0..32 { acc[j] ^= b[j]; }
+    }
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, 32) };
+    dst.copy_from_slice(&acc);
+}
+
+/// SIMD compress+reduce, NO root: hash the whole input as one subtree via the hazmat finalize_non_root
+/// (the crate's SIMD hash_many pipeline, minus the final root compress). Compare to bp_blake3 (with root)
+/// to confirm the root cost is negligible, and to our full pipeline. `n` must be a power-of-two multiple
+/// of CHUNK_LEN (a valid left-aligned subtree).
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_blake3_subtree(data: *const u8, n: usize, out: *mut u8) {
+    use blake3::hazmat::HasherExt;
+    let slice = unsafe { std::slice::from_raw_parts(data, n) };
+    let cv = blake3::Hasher::new().update(slice).finalize_non_root();
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, 32) };
+    dst.copy_from_slice(&cv);
+}
+
 // Handle-based hashbrown: build the map ONCE, time each op on the handle (the build-included
 // bp_hashbrown_roundtrip was build-dominated, and compared with_capacity vs a no-sizehint Julia Dict).
 type HbMap = hashbrown::HashMap<u64, u64>;
