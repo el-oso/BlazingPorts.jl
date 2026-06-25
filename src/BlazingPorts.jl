@@ -20,6 +20,7 @@ Submodules (one per crate family):
 - [`StringSearch`](@ref)    — SIMD substring search (memchr/memmem probe).
 - [`IntFormat`](@ref)       — branchless int→decimal formatting (itoa probe).
 - [`SwissDict`](@ref)       — SIMD group-probe hashmap (hashbrown probe).
+- [`Blake3`](@ref)          — BLAKE3 SIMD hash_many port (blake3 probe, N=8 AVX2).
 """
 module BlazingPorts
 
@@ -30,6 +31,7 @@ include("Factorizations.jl")
 include("StringSearch.jl")
 include("IntFormat.jl")
 include("SwissDict.jl")
+include("Blake3.jl")
 
 using .SmallMatrix
 using .SpecialFns
@@ -38,5 +40,6 @@ using .Factorizations
 using .StringSearch
 using .IntFormat
 using .SwissDict
+using .Blake3
 
 end # module BlazingPorts
