@@ -35,10 +35,14 @@
         ctx = Blake3Ctx(); update!(ctx, data); digest(ctx)
     end
 
-    # Spot-check that our output matches Blake3Hash.jl at several chunk counts.
-    for nchunks in [1, 2, 4, 7, 8, 9, 15, 16, 17, 32, 64]
+    # Spot-check that our output matches Blake3Hash.jl at several chunk counts. The list crosses the
+    # SIMD super-group boundary (256 chunks = 16 batches) and its remainders, which the full-width
+    # `_reduce_supergroup!` restructured — 255/256/257/272/273/512 exercise super-group + tail paths.
+    for nchunks in [1, 2, 4, 7, 8, 9, 15, 16, 17, 32, 64, 255, 256, 257, 272, 273, 512, 513]
         data = make_input(nchunks * 1024)
         @test blake3(data) == jl_ref(data)
+        data1 = make_input(nchunks * 1024 + 137)   # + partial final chunk
+        @test blake3(data1) == jl_ref(data1)
     end
 
     # 1 MiB agreement with Blake3Hash.jl

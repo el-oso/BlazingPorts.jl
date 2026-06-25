@@ -171,8 +171,9 @@ for (label, n_bytes, p_jl, p_rust, p_ours) in [
         par_ours >= Harness.PARITY_GATE ? "≥ 0.96 PARITY" : "< 0.96 gap remains")
 end
 
-# ── persist + plot (three-way 1 MiB — canonical probe) ──────────────────────────────────────────────
-threeway = Probe[p1_jl, p1_ours, p1_rust]
+# ── persist + plot (three-way 16 MiB — canonical: 1 MiB is GC-noisy at ~0.16 ms, median stable but
+#    σ huge; 16 MiB amortizes the per-call allocations so the distribution is clean) ──────────────────
+threeway = Probe[p16_jl, p16_ours, p16_rust]
 save_probes("blake3", threeway)
 out = plot_probe("blake3", threeway)
 println("\n  plot → $out")

@@ -29,16 +29,24 @@ The famous "8.7× gap" was a **dead-code-elimination artifact** — the Rust shi
 
 ![itoa: ours vs the crate](assets/itoa.png)
 
-## blake3 → `Blake3` — ⏳ ported, optimizing
+## blake3 → `Blake3` — ⏳ kernel beats the crate; full pipeline 0.82–0.92×
 
 `Blake3Hash.jl` (the pure-Julia ecosystem package) is scalar — 0.085× the crate. We ported a
-`Vec{16,UInt32}` AVX-512 `hash_many`, byte-exact on all 10 official BLAKE3 test vectors.
+`Vec{16,UInt32}` AVX-512 `hash_many`, byte-exact on the official BLAKE3 test vectors **and** against the
+crate across the SIMD/reduce path (super-group boundaries, remainders, partial chunks).
 
-- **Result so far:** **5.44 GB/s vs the crate's 7.69 = 0.71×**, and **7.4× over `Blake3Hash.jl`**.
-- The residual is *not* the message transpose (a free load only reaches 0.81×) — it's the **compute**:
-  the compress is ILP-bound (~2 vector ops/cycle vs ~4 issuable), where the crate's hand-scheduled
-  assembly interleaves the independent G-calls better. A compute-ILP + SIMD-transpose marathon toward
-  the 0.96× gate is in progress.
+- **The compress kernel *beats* the crate — 1.04–1.05×** (pass-1-only, 7.5 vs 7.2 GB/s, single-thread).
+  This is the headline: pure SIMD.jl, no assembly, **out-runs `blake3`'s hand-written AVX-512 on the
+  hot kernel** — the "language is not the gap" thesis, measured. The earlier docs claimed the compress
+  was the bottleneck; direct measurement disproved it.
+- **The gap is the tree-reduce orchestration**, not the kernel. The chunk-CV reduction was running at
+  *narrowing* SIMD width (8→4→2→1 lanes). Rewriting it to a **full-width (lane = batch) cross-batch
+  reduction** — buffer 16 chunk-batches, transpose so lane = batch, run the parent tree 16-wide, fold
+  each 256-chunk super-group to one mega-root — cut the orchestration from ~20% to ~8–12% and lifted the
+  full pipeline from 0.88× to **0.92× (16 MiB)** / **0.82× (1 MiB**, where the crate is L2-resident and
+  most tuned). Byte-exact; per-call `malloc` removed.
+- **Remaining gap:** the residual is the transpose + parent-reduce overhead inherent to this structure.
+  Closing it to ≥0.96 needs the crate's recursive cache-blocked subtree reduction (`compress_subtree`).
 
 ![blake3: ours vs the crate](assets/blake3.png)
 

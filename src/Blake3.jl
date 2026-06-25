@@ -1,7 +1,7 @@
 """
     Blake3
 
-Pure-Julia BLAKE3 with a SIMD `hash_many` kernel (N=8 wide, AVX2/AVX-512 via SIMD.jl).
+Pure-Julia BLAKE3 with a SIMD `hash_many` kernel (N=16 wide, AVX-512 via SIMD.jl).
 
 BLAKE3's throughput is dominated by compressing 1024-byte chunks. `hash_many` processes N
 independent chunks in parallel by transposing state: each lane of `Vec{N,UInt32}` holds one
@@ -16,6 +16,7 @@ No StrictMode dep (package rule). `@assert_vectorized`/`@assert_noalloc` live in
 module Blake3
 
 using SIMD: Vec, shufflevector
+using Base.Cartesian: @nexprs
 
 export blake3
 
@@ -713,15 +714,51 @@ function _compress_last_chunk(p::Ptr{UInt8}, nbytes::Int, chunk_counter::UInt64)
             UInt32(remaining), last_flags, counter_lo, counter_hi)
 end
 
+# ── Full-width (lane = batch) tree reduce for a super-group of 16 chunk-batches (256 chunks) ──────
+# The per-batch `_reduce_16cvs_to_1` runs the parent tree at NARROWING SIMD width (8→4→2→1 lanes),
+# paying a full 7-round compress latency per level while using a fraction of the 16-wide unit — ~20%
+# of total throughput. Here we buffer 16 batches' leaf CVs, transpose so **lane = batch** (one 16×16
+# transpose per word; pairing chunk-positions then needs NO in-vector shuffles), and run the whole
+# parent tree 16-wide: 15 parent compresses for 256 chunks (~6%) vs 64 narrowing compresses before.
+# Byte-identical to 16 independent `_reduce_16cvs_to_1` calls (verified). `buf[b*8+w]` holds word w
+# (1..8) of batch b (0..15). A super-group is a clean 256-chunk (2⁸) subtree, so we fold its 16
+# batch-roots to ONE mega-root and push it once with `mega_counter` (= super-group index) — 16× fewer
+# scalar `_cv_stack` merges than pushing 16 batch-roots, and the narrowing `_reduce_16cvs_to_1` runs
+# once per 256 chunks instead of once per 16. Valid because pushing a 2^k-chunk subtree-root with
+# counter = (#such subtrees so far) leaves the stack identical to pushing the underlying chunks.
+@inline _gp8(t1,t2,t3,t4,t5,t6,t7,t8, ::Val{c}) where {c} =
+    (t1[c], t2[c], t3[c], t4[c], t5[c], t6[c], t7[c], t8[c])
+@inline _parent8(L::NTuple{8,V}, R::NTuple{8,V}) where {V<:Vec{16,UInt32}} =
+    _compress_N_parents(L[1],L[2],L[3],L[4],L[5],L[6],L[7],L[8], R[1],R[2],R[3],R[4],R[5],R[6],R[7],R[8])
+
+function _reduce_supergroup!(cv_stack::Vector{UInt32}, stack_len::Int,
+        bufp::Ptr{Vec{16,UInt32}}, mega_counter::UInt64)
+    @inbounds begin
+        # transpose each word: tw_w[c] lane b = buf[b*8+w] lane c  (lane k=chunk-in-batch → lane b=batch)
+        @nexprs 8 w -> tw_w = _transpose16x16(ntuple(b -> unsafe_load(bufp, (b - 1) * 8 + w), Val(16))...)
+        tws = (tw_1, tw_2, tw_3, tw_4, tw_5, tw_6, tw_7, tw_8)
+        gp(::Val{c}) where {c} = _gp8(tws..., Val(c))
+        # 16-wide parent tree, pairing positions (lane=batch fixed throughout)
+        @nexprs 8 i -> P1_i = _parent8(gp(Val(2i - 1)), gp(Val(2i)))   # L1: 16 chunks → 8 parents
+        @nexprs 4 i -> P2_i = _parent8(P1_{2i - 1}, P1_{2i})           # L2: 8 → 4
+        @nexprs 2 i -> P3_i = _parent8(P2_{2i - 1}, P2_{2i})           # L3: 4 → 2
+        P4 = _parent8(P3_1, P3_2)                                      # L4: 2 → 1 batch-root per lane
+        # fold the 16 batch-roots (lane b = batch-root b) → 1 mega-root, push once (counter = super-group)
+        m1,m2,m3,m4,m5,m6,m7,m8 = _reduce_16cvs_to_1(P4[1],P4[2],P4[3],P4[4],P4[5],P4[6],P4[7],P4[8])
+        stack_len = _cv_stack_push!(cv_stack, stack_len, m1,m2,m3,m4,m5,m6,m7,m8, mega_counter)
+    end
+    return stack_len
+end
+
 # ── Public API ────────────────────────────────────────────────────────────────────────────────────
 """
     blake3(data::AbstractVector{UInt8}) -> Vector{UInt8}
 
 Compute the BLAKE3 hash of `data`, returning a 32-byte digest.
 
-Two-pass pipeline: Pass 1 hashes all full 16-chunk SIMD batches into a CV buffer without
-any tree reduction; Pass 2 reduces the buffer using `_reduce_16cvs_to_1` and `_cv_stack_push!`.
-Separating the phases avoids pipeline stalls from interleaving chunk compress and tree reduce.
+SIMD pipeline: chunks are compressed N=16-wide (`_compress_N_chunks_full`); the chunk-CV tree is
+reduced 16-wide across batches of 16 (`_reduce_supergroup!`, lane = batch), then folded with the
+`_cv_stack` up the right edge of the tree.
 """
 function blake3(data::AbstractVector{UInt8})
     out = Vector{UInt8}(undef, 32)
@@ -738,60 +775,48 @@ function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
     cv_stack = zeros(UInt32, 54 * 8)   # CV stack: max 54 entries (log2(2^54) chunks)
     stack_len = 0
     chunk_counter = UInt64(0)
-    batch_counter = UInt64(0)  # counts 16-chunk super-batches for SIMD tree reduction
 
-    # ── TWO-PASS SIMD: Pass 1 — chunk compress, Pass 2 — tree reduce ─────────────────────────────
-    # Separating the two phases avoids pipeline stalls from interleaving _reduce_16cvs_to_1
-    # with _compress_N_chunks_full in the same loop body.
-    #
-    # CV buffer: SoA-16 layout — 8 Vec{16,UInt32}s per batch, stored as 8 consecutive
-    # Ptr{Vec{16,UInt32}} entries. Each Vec{16,UInt32} holds one CV word across all 16
-    # chunks in the batch (word-major, same as what _compress_N_chunks_full returns).
-    #
-    # Buffer size: n_batches × 8 × sizeof(Vec{16,UInt32}) = n_batches × 512 bytes.
-    # For 64 MiB: 4096 × 512 = 2 MB — fits in L3 cache comfortably.
-    #
-    # Use strict > to ensure at least 1 byte remains for the mandatory final chunk.
-    # BLAKE3 spec: there is always a "current chunk" with at least 1 byte; 0-byte input
-    # is handled separately as a single degenerate chunk. The loops below guarantee nbytes>0
-    # at the point we call _compress_last_chunk.
-    # ponytail: two-pass separates chunk compress from tree reduce for pipeline efficiency;
-    # upgrade to a single fused loop if LLVM learns to schedule them without stalls.
-    # How many full 16-chunk SIMD batches can run while leaving ≥ 1 byte for the final chunk.
-    # Equivalent to the original "while n > N*CHUNK_LEN" loop count.
+    # ── FULL-WIDTH SIMD reduction: process 16 chunk-batches (256 chunks) per super-group ─────────
+    # Each batch = 16 chunks compressed N=16-wide by `_compress_N_chunks_full`. Rather than reducing
+    # each batch alone (narrowing 8→4→2→1, ~20% overhead), we buffer 16 batches' leaf CVs, transpose
+    # to lane=batch, and run the parent tree 16-wide in `_reduce_supergroup!` (≈6%). Tail batches
+    # (n_batches % 16) use the per-batch `_reduce_16cvs_to_1`. The buffer is a fixed 128-Vec scratch
+    # (8 KiB) — no per-call variable malloc (which made the small-input timing GC-noisy).
+    # `> N*CHUNK_LEN` would over-count; we use `(n-1) ÷ (N*CHUNK_LEN)` to always leave ≥1 byte for the
+    # mandatory final chunk (BLAKE3 keeps a "current chunk" of ≥1 byte; 0-byte input is degenerate).
     n_batches = max(0, (n - 1)) ÷ (N * CHUNK_LEN)  # 0 for small inputs
-
-    # ── Pass 1: hash all N=16-chunk batches, store chunk CVs ──────────────────────────────────
-    # CV buffer: SoA-16 layout, n_batches × 8 Vec{N,UInt32}s.
-    # Libc.malloc bypasses GC — no heap pressure in the benchmark loop.
-    # ponytail: malloc/free; upgrade to a thread-local arena if multiple threads are ever added.
-    cv_buf_ptr = Ptr{Vec{N,UInt32}}(Libc.malloc(n_batches * 8 * sizeof(Vec{N,UInt32})))
-    let p_pass1 = p
-        for k in 0:n_batches-1
+    n_super = n_batches ÷ 16
+    rem_batches = n_batches % 16
+    # one super-group's leaf CVs: bufp[b*8+w]. Fixed 8 KiB via Libc.malloc (no per-call GC alloc → the
+    # small-input timing was GC-noisy with a Julia Vector here).
+    bufp = Ptr{Vec{16,UInt32}}(Libc.malloc(16 * 8 * sizeof(Vec{16,UInt32})))
+    # super-groups of 16 batches → 16-wide tree reduce
+    for sg in 0:n_super-1
+        @inbounds for b in 0:15
             v1,v2,v3,v4,v5,v6,v7,v8 = _compress_N_chunks_full(
-                _BasePtr16(p_pass1), KEY1,KEY2,KEY3,KEY4,KEY5,KEY6,KEY7,KEY8, UInt64(k) * N)
-            base = k * 8
-            unsafe_store!(cv_buf_ptr, v1, base+1); unsafe_store!(cv_buf_ptr, v2, base+2)
-            unsafe_store!(cv_buf_ptr, v3, base+3); unsafe_store!(cv_buf_ptr, v4, base+4)
-            unsafe_store!(cv_buf_ptr, v5, base+5); unsafe_store!(cv_buf_ptr, v6, base+6)
-            unsafe_store!(cv_buf_ptr, v7, base+7); unsafe_store!(cv_buf_ptr, v8, base+8)
-            p_pass1 += N * CHUNK_LEN
+                _BasePtr16(p + (sg * 16 + b) * (N * CHUNK_LEN)),
+                KEY1,KEY2,KEY3,KEY4,KEY5,KEY6,KEY7,KEY8, UInt64(sg * 16 + b) * N)
+            unsafe_store!(bufp, v1, b*8+1); unsafe_store!(bufp, v2, b*8+2)
+            unsafe_store!(bufp, v3, b*8+3); unsafe_store!(bufp, v4, b*8+4)
+            unsafe_store!(bufp, v5, b*8+5); unsafe_store!(bufp, v6, b*8+6)
+            unsafe_store!(bufp, v7, b*8+7); unsafe_store!(bufp, v8, b*8+8)
+        end
+        stack_len = _reduce_supergroup!(cv_stack, stack_len, bufp, UInt64(sg))
+    end
+    Libc.free(bufp)
+
+    # remainder (< 16) batches: per-batch narrowing reduce (small fraction of any large input)
+    let p_rem = p + n_super * 16 * (N * CHUNK_LEN)
+        for b in 0:rem_batches-1
+            gb = n_super * 16 + b
+            v1,v2,v3,v4,v5,v6,v7,v8 = _compress_N_chunks_full(
+                _BasePtr16(p_rem), KEY1,KEY2,KEY3,KEY4,KEY5,KEY6,KEY7,KEY8, UInt64(gb) * N)
+            sb1,sb2,sb3,sb4,sb5,sb6,sb7,sb8 = _reduce_16cvs_to_1(v1,v2,v3,v4,v5,v6,v7,v8)
+            stack_len = _cv_stack_push!(cv_stack, stack_len,
+                sb1,sb2,sb3,sb4,sb5,sb6,sb7,sb8, UInt64(gb))
+            p_rem += N * CHUNK_LEN
         end
     end
-
-    # ── Pass 2: tree-reduce each batch's 16 chunk CVs → 1 batch root, push to stack ────────────
-    for k in 0:n_batches-1
-        base = k * 8
-        v1 = unsafe_load(cv_buf_ptr, base+1); v2 = unsafe_load(cv_buf_ptr, base+2)
-        v3 = unsafe_load(cv_buf_ptr, base+3); v4 = unsafe_load(cv_buf_ptr, base+4)
-        v5 = unsafe_load(cv_buf_ptr, base+5); v6 = unsafe_load(cv_buf_ptr, base+6)
-        v7 = unsafe_load(cv_buf_ptr, base+7); v8 = unsafe_load(cv_buf_ptr, base+8)
-        sb1,sb2,sb3,sb4,sb5,sb6,sb7,sb8 = _reduce_16cvs_to_1(v1,v2,v3,v4,v5,v6,v7,v8)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            sb1,sb2,sb3,sb4,sb5,sb6,sb7,sb8, batch_counter)
-        batch_counter += 1
-    end
-    Libc.free(cv_buf_ptr)
 
     # Advance pointers past all processed batches
     p += n_batches * N * CHUNK_LEN
