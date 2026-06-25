@@ -33,7 +33,7 @@ const FLAG_ROOT        = UInt32(8)
 const BLOCK_LEN = 64
 const CHUNK_LEN = 1024
 # SIMD width: 8 × UInt32 = 256-bit AVX2 register. N=8 targets AVX2 (the primary gap kernel).
-const N = 8
+const N = 16   # SIMD lanes: Vec{16,UInt32} → AVX-512 (zmm) on this Zen5; the crate auto-selects N=16 too
 
 # Unkeyed hashing uses IV as the key
 const KEY1 = IV1; const KEY2 = IV2; const KEY3 = IV3; const KEY4 = IV4
@@ -456,24 +456,12 @@ function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
         vcv1,vcv2,vcv3,vcv4,vcv5,vcv6,vcv7,vcv8 = _compress_N_chunks_full(
             ptrs, KEY1,KEY2,KEY3,KEY4,KEY5,KEY6,KEY7,KEY8, chunk_counter)
 
-        # Extract per-chunk scalar CVs from SIMD vectors and push into the tree.
-        # Use integer indexing of Vec (SIMD.jl supports 1-based Int indexing as literals).
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[1],vcv2[1],vcv3[1],vcv4[1],vcv5[1],vcv6[1],vcv7[1],vcv8[1], chunk_counter+0)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[2],vcv2[2],vcv3[2],vcv4[2],vcv5[2],vcv6[2],vcv7[2],vcv8[2], chunk_counter+1)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[3],vcv2[3],vcv3[3],vcv4[3],vcv5[3],vcv6[3],vcv7[3],vcv8[3], chunk_counter+2)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[4],vcv2[4],vcv3[4],vcv4[4],vcv5[4],vcv6[4],vcv7[4],vcv8[4], chunk_counter+3)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[5],vcv2[5],vcv3[5],vcv4[5],vcv5[5],vcv6[5],vcv7[5],vcv8[5], chunk_counter+4)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[6],vcv2[6],vcv3[6],vcv4[6],vcv5[6],vcv6[6],vcv7[6],vcv8[6], chunk_counter+5)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[7],vcv2[7],vcv3[7],vcv4[7],vcv5[7],vcv6[7],vcv7[7],vcv8[7], chunk_counter+6)
-        stack_len = _cv_stack_push!(cv_stack, stack_len,
-            vcv1[8],vcv2[8],vcv3[8],vcv4[8],vcv5[8],vcv6[8],vcv7[8],vcv8[8], chunk_counter+7)
+        # Extract per-chunk scalar CVs (lane k = chunk k) and push into the tree. One pass over the N
+        # lanes — cold relative to the 7-round compress above, so the runtime Vec lane-index is fine.
+        @inbounds for k in 1:N
+            stack_len = _cv_stack_push!(cv_stack, stack_len,
+                vcv1[k],vcv2[k],vcv3[k],vcv4[k],vcv5[k],vcv6[k],vcv7[k],vcv8[k], chunk_counter + UInt64(k-1))
+        end
 
         p += N * CHUNK_LEN
         n -= N * CHUNK_LEN
