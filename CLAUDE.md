@@ -32,6 +32,22 @@ Project-specific requirements. Sibling to PureFFT.jl; the campaign tracker is
 6. **One audit per submodule** (`audit(BlazingPorts.<Crate>; sweep=true, guarantees=...)`), not a
    whole-package sweep. One `@testitem` per crate, **tagged**, so a crate runs in isolation.
 
+7. **Per-crate reproducible pipeline (MUST).** Every crate/module's claims must be reproducible by
+   **anyone, on a fresh checkout, at any point** — no hidden state, no "you had to be there." For each
+   crate the work isn't done until it ships a self-contained pipeline:
+   - **Results script** — (re)runs the probe single-thread, **builds the Rust cdylib if `cargo` is
+     present** (else degrades gracefully to Julia-vs-baseline), and **saves the full per-sample
+     distributions** to `bench/results/<crate>*.json`.
+   - **Plot script** — regenerates that crate's plots **from the saved JSON alone**, never by
+     re-running the benchmark (re-running is noisy; saved datapoints are the source of truth).
+   - **Docs** — reference only the regenerated plots; update the prose **and** the gap-log row to the
+     regenerated numbers.
+   - **Commit everything** (script + saved data + plots + docs) to wrap up.
+   You don't need to regenerate the whole campaign at once — **one crate's results + plots + docs is the
+   unit.** Template: `bench/compare_factorizations.jl` (results) + `bench/plot_faer_compare.jl` (plots
+   from saved JSON). Re-measure only for a genuinely new measurement or changed code; plots always come
+   from saved datapoints.
+
 ## Standing rules
 
 - `isnothing(x)` / `!isnothing(x)` — never `=== nothing`.
