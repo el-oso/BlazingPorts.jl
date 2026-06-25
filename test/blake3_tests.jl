@@ -16,6 +16,10 @@
         (1025,   "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444"),
         (2048,   "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a"),
         (102400, "bc3e3d41a1146b069abffad3c0d44860cf664390afce4d9661f7902e7943e085"),
+        # Additional odd-size vectors (verified against bp_blake3 Rust crate)
+        (1500,    "e71e67e776854018461734062301034d08f1be79d8fa59ae1daf61eda2c65318"),
+        (17408,   "993924ff3dcbd868be9cf3fed98d4538fe579ffccf390a5aa1ddba0f6a20bfed"),
+        (1000000, "5e82c663d164c54e4fcdfcd70e3ca464662228bdbad45cce2e0c2bff999064ef"),
     ]
 
     # Test every official vector: byte-exact
