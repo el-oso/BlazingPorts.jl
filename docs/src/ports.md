@@ -39,7 +39,7 @@ remainders, partial chunks).
 BLAKE3 has two phases: a 16-wide SIMD **compress** (≈94% of the work) and a small tree **reduce**. The
 compress is where throughput is decided.
 
-![BLAKE3 two phases](assets/blake3_pipeline.svg)
+![BLAKE3 two phases](assets/blake3_pipeline.png)
 
 ### The three-way measurement (this is the real finding)
 
@@ -60,9 +60,9 @@ its bundled `.S` the crate falls back to 8-wide AVX2 and loses to our 16-wide. *
 isn't beating us — a hand-written assembly file is**, and that asm out-runs what *either* language's
 compiler emits by 13%.
 
-### Why the assembly is 13% faster — and why no compiler closes it
+### Why the assembly is faster — and why no compiler closes it
 
-![Register file: why hand-asm wins](assets/blake3_registers.svg)
+![Register file: why hand-asm wins](assets/blake3_registers.png)
 
 The compress kernel fills **all 32 AVX-512 registers** (16 hash-state + 16 message words). We measured it
 directly with `code_native`: 32/32 zmm used, 53 spills — *register-saturated*. The tree-reduce is the same
