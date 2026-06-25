@@ -1,14 +1,11 @@
-# Probe: Blake3Hash.jl (pure-Julia BLAKE3, no SIMD) vs the blake3 Rust crate.
-# BLAKE3's performance comes entirely from SIMD hash_many — processing N independent
-# blocks/chunks in parallel (AVX2=8-wide, AVX-512=16-wide). Blake3Hash.jl is a scalar
-# SVector-based implementation (README: "needs SIMD updates"). Measure the gap, then
-# decide: document-skip (unlikely) or Phase B SIMD hash_many port.
+# Probe: Blake3Hash.jl (pure-Julia scalar) vs blake3 Rust crate vs BlazingPorts.Blake3 (SIMD).
+# BLAKE3's performance comes from SIMD hash_many — N independent chunks in parallel (AVX2=8-wide).
+# Phase A showed Blake3Hash.jl at 0.084× the crate (11× gap). Phase B ports the SIMD kernel.
 #
-# Correctness: both sides produce byte-exact output matching the official BLAKE3
-# test vectors (same input encoding: byte i = i % 251).
-#
-# DCE defeat: both sides consume the 32-byte digest via sum()/xor fold + Base.donotdelete.
-# The Rust shim writes the digest to an out-pointer (externally visible; no elision).
+# Three contenders:
+#   1. Blake3Hash.jl    — scalar SVector (ecosystem baseline, no SIMD)
+#   2. blake3 crate     — Rust reference with AVX2/AVX-512 hash_many (the target)
+#   3. BlazingPorts.Blake3 — our SIMD port, Vec{8,UInt32} hash_many (this session)
 #
 # Run: taskset -c 2 julia -t 1 --project=bench bench/probe_blake3.jl
 #   (build Rust lib first: bash bench/rust_compare/build.sh)
@@ -16,6 +13,7 @@
 include(joinpath(@__DIR__, "harness.jl"))
 using .Harness
 using Blake3Hash
+using BlazingPorts.Blake3: blake3 as our_blake3
 using Printf
 
 Harness.single_thread!()
@@ -108,42 +106,74 @@ end
 all(correct_results) || error("Correctness check FAILED — do not trust throughput numbers")
 println("  All correct ✓ (byte-exact vs official BLAKE3 test vectors, both sides agree)")
 
-# ── throughput probe: 1 MiB ──────────────────────────────────────────────────────────────────────────
-# Warm up JIT
-jl_hash_1m(); rust_hash_1m()
-
-println("\n=== blake3: 1 MiB buffer, single-thread ===")
-p1_jl   = run_probe("Blake3Hash.jl",  jl_hash_1m;   seconds = 4.0)
-p1_rust = run_probe("blake3 crate",   rust_hash_1m; seconds = 4.0)
-
-# ── throughput probe: 16 MiB ─────────────────────────────────────────────────────────────────────────
-jl_hash_16m(); rust_hash_16m()
-
-println("\n=== blake3: 16 MiB buffer, single-thread ===")
-p16_jl   = run_probe("Blake3Hash.jl",  jl_hash_16m;   seconds = 4.0)
-p16_rust = run_probe("blake3 crate",   rust_hash_16m; seconds = 4.0)
-
-# ── report ───────────────────────────────────────────────────────────────────────────────────────────
-for (label, n_bytes, p_jl, p_rust) in [
-        ("1 MiB",  1*1024*1024,  p1_jl,  p1_rust),
-        ("16 MiB", 16*1024*1024, p16_jl, p16_rust)]
-    gbps_jl   = n_bytes / p_jl.median   / 1e9
-    gbps_rust = n_bytes / p_rust.median / 1e9
-    ns_jl     = p_jl.median  * 1e9 / n_bytes
-    ns_rust   = p_rust.median * 1e9 / n_bytes
-    par       = Harness.parity(p_jl.median, p_rust.median)
-    verdict   = par >= Harness.PARITY_GATE ? "GOOD ENOUGH (document-skip)" : "BELOW GATE → port justified"
-    println("\n── $label ──")
-    @printf("  Blake3Hash.jl  %6.2f GB/s  %.3f ns/byte  (median %.2f ms, rel-σ %.1f%%)\n",
-        gbps_jl, ns_jl, 1e3*p_jl.median, 100*p_jl.relσ)
-    @printf("  blake3 crate   %6.2f GB/s  %.3f ns/byte  (median %.2f ms, rel-σ %.1f%%)\n",
-        gbps_rust, ns_rust, 1e3*p_rust.median, 100*p_rust.relσ)
-    @printf("  parity (rust/julia) = %.3f   %s\n", par, verdict)
+# ── wrappers for BlazingPorts.Blake3 ─────────────────────────────────────────────────────────────
+@noinline function our_hash_1m()
+    h = our_blake3(BUF_1MIB)
+    Base.donotdelete(h)
+    return sum(h)
 end
 
-# ── persist + plot (head-to-head 1 MiB — the canonical single number) ──────────────────────────────
-headtohead_1m = Probe[p1_jl, p1_rust]
-save_probes("blake3", headtohead_1m)
-out = plot_probe("blake3", headtohead_1m)
+@noinline function our_hash_16m()
+    h = our_blake3(BUF_16MIB)
+    Base.donotdelete(h)
+    return sum(h)
+end
+
+# Also verify our impl against official vectors
+function hex_digest_ours(data)
+    join(string.(our_blake3(data), base=16, pad=2))
+end
+
+println("\n=== BlazingPorts.Blake3 correctness (SIMD hash_many) ===")
+ours_correct = map(VECTORS) do (n, expected)
+    data = make_input(n)
+    got = hex_digest_ours(data)
+    ok = (got == expected)
+    ok || @printf("  FAIL n=%d: got=%s exp=%s\n", n, got, expected)
+    ok
+end
+all(ours_correct) ? println("  All correct ✓ (byte-exact vs official BLAKE3 test vectors)") :
+                    error("BlazingPorts.Blake3 correctness FAILED")
+
+# ── throughput probe: 1 MiB ──────────────────────────────────────────────────────────────────────────
+jl_hash_1m(); rust_hash_1m(); our_hash_1m()  # warm up
+
+println("\n=== blake3: 1 MiB buffer, single-thread ===")
+p1_jl   = run_probe("Blake3Hash.jl",  jl_hash_1m;  seconds = 4.0)
+p1_rust = run_probe("blake3 crate",   rust_hash_1m; seconds = 4.0)
+p1_ours = run_probe("ours (BP.Blake3)", our_hash_1m; seconds = 4.0)
+
+# ── throughput probe: 16 MiB ─────────────────────────────────────────────────────────────────────────
+jl_hash_16m(); rust_hash_16m(); our_hash_16m()
+
+println("\n=== blake3: 16 MiB buffer, single-thread ===")
+p16_jl   = run_probe("Blake3Hash.jl",  jl_hash_16m;  seconds = 4.0)
+p16_rust = run_probe("blake3 crate",   rust_hash_16m; seconds = 4.0)
+p16_ours = run_probe("ours (BP.Blake3)", our_hash_16m; seconds = 4.0)
+
+# ── report ───────────────────────────────────────────────────────────────────────────────────────────
+for (label, n_bytes, p_jl, p_rust, p_ours) in [
+        ("1 MiB",  1*1024*1024,  p1_jl,  p1_rust, p1_ours),
+        ("16 MiB", 16*1024*1024, p16_jl, p16_rust, p16_ours)]
+    gbps(p) = n_bytes / p.median / 1e9
+    nsb(p)  = p.median * 1e9 / n_bytes
+    par_jl  = Harness.parity(p_jl.median,  p_rust.median)
+    par_ours = Harness.parity(p_ours.median, p_rust.median)
+    println("\n── $label ──")
+    @printf("  %-24s %6.2f GB/s  %.3f ns/byte  (median %.2f ms, rel-σ %.1f%%)\n",
+        "Blake3Hash.jl",    gbps(p_jl),   nsb(p_jl),   1e3*p_jl.median,   100*p_jl.relσ)
+    @printf("  %-24s %6.2f GB/s  %.3f ns/byte  (median %.2f ms, rel-σ %.1f%%)\n",
+        "ours (BP.Blake3)", gbps(p_ours), nsb(p_ours), 1e3*p_ours.median, 100*p_ours.relσ)
+    @printf("  %-24s %6.2f GB/s  %.3f ns/byte  (median %.2f ms, rel-σ %.1f%%)\n",
+        "blake3 crate",     gbps(p_rust), nsb(p_rust), 1e3*p_rust.median, 100*p_rust.relσ)
+    @printf("  parity Blake3Hash.jl / crate = %.3f\n", par_jl)
+    @printf("  parity ours / crate          = %.3f   %s\n", par_ours,
+        par_ours >= Harness.PARITY_GATE ? "≥ 0.96 PARITY" : "< 0.96 gap remains")
+end
+
+# ── persist + plot (three-way 1 MiB — canonical probe) ──────────────────────────────────────────────
+threeway = Probe[p1_jl, p1_ours, p1_rust]
+save_probes("blake3", threeway)
+out = plot_probe("blake3", threeway)
 println("\n  plot → $out")
 println("\nDone — probe_blake3.jl")

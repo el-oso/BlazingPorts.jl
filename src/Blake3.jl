@@ -434,6 +434,11 @@ function blake3(data::AbstractVector{UInt8})
     return out
 end
 
+# Build N chunk pointers from a base pointer, spaced CHUNK_LEN apart.
+# A named function (not a lambda) avoids boxing `p` when p is mutable in the caller.
+@inline _make_ptrs(p::Ptr{UInt8}, ::Val{N}) where {N} =
+    ntuple(k -> p + (k-1)*CHUNK_LEN, Val(N))
+
 function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
     cv_stack = zeros(UInt32, 54 * 8)   # CV stack: max 54 entries (log2(2^54) chunks)
     stack_len = 0
@@ -445,7 +450,8 @@ function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
     # is handled separately as a single degenerate chunk. The loops below guarantee nbytes>0
     # at the point we call _compress_last_chunk.
     while n > N * CHUNK_LEN
-        ptrs = ntuple(k -> p + (k-1)*CHUNK_LEN, Val(N))
+        # Build ptrs without capturing mutable `p` in a closure — use a helper to avoid boxing.
+        ptrs = _make_ptrs(p, Val(N))
 
         vcv1,vcv2,vcv3,vcv4,vcv5,vcv6,vcv7,vcv8 = _compress_N_chunks_full(
             ptrs, KEY1,KEY2,KEY3,KEY4,KEY5,KEY6,KEY7,KEY8, chunk_counter)
