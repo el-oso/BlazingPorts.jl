@@ -307,10 +307,13 @@ end
 end
 
 # Load one 64-byte block from each of 16 chunks and return 16 word-major Vec{16,UInt32}.
-# ptrs[k] + off is the start of chunk k's current block (all contiguous 64B).
-# 16 vload512 + 4 butterfly stages of shufflevector — no strided gathers.
+# Two variants:
+#   NTuple path: ptrs[k] + off  (legacy, used for N=8 test compatibility)
+#   BasePtr16 path: base + (k-1)*CHUNK_LEN + off  (hot path, avoids 16-ptr register pressure)
+# Both end in _transpose16x16; only the load addresses differ.
+struct _BasePtr16 base::Ptr{UInt8} end  # thin wrapper to distinguish from NTuple dispatch
+
 @inline function _load_and_transpose16(ptrs::NTuple{16,Ptr{UInt8}}, off::Int)
-    # Load each chunk's 16-word block as one contiguous Vec{16,UInt32}
     @inline _vload(p) = unsafe_load(Ptr{Vec{16,UInt32}}(p))
     r1  = _vload(ptrs[1]  + off);  r2  = _vload(ptrs[2]  + off)
     r3  = _vload(ptrs[3]  + off);  r4  = _vload(ptrs[4]  + off)
@@ -322,10 +325,24 @@ end
     r15 = _vload(ptrs[15] + off);  r16 = _vload(ptrs[16] + off)
     return _transpose16x16(r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15,r16)
 end
+@inline function _load_and_transpose16(src::_BasePtr16, off::Int)
+    # Compute load addresses from base + stride, one at a time — avoids 16-ptr NTuple.
+    base = src.base
+    @inline _vload(k) = unsafe_load(Ptr{Vec{16,UInt32}}(base + (k-1)*CHUNK_LEN + off))
+    r1  = _vload(1);  r2  = _vload(2);  r3  = _vload(3);  r4  = _vload(4)
+    r5  = _vload(5);  r6  = _vload(6);  r7  = _vload(7);  r8  = _vload(8)
+    r9  = _vload(9);  r10 = _vload(10); r11 = _vload(11); r12 = _vload(12)
+    r13 = _vload(13); r14 = _vload(14); r15 = _vload(15); r16 = _vload(16)
+    return _transpose16x16(r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15,r16)
+end
 
-# Dispatch: for N=16 use SIMD transpose; for other N fall back to strided loads.
+# Dispatch: for N=16 NTuple path and BasePtr16 path use SIMD transpose;
+# for other N fall back to strided loads.
 @inline function _load_block_transposed(ptrs::NTuple{16,Ptr{UInt8}}, off::Int, ::Val{16})
     _load_and_transpose16(ptrs, off)
+end
+@inline function _load_block_transposed(src::_BasePtr16, off::Int, ::Val{16})
+    _load_and_transpose16(src, off)
 end
 @inline function _load_block_transposed(ptrs::NTuple{N,Ptr{UInt8}}, off::Int, ::Val{N}) where N
     @inline load_word(word_idx::Int) =
@@ -340,8 +357,22 @@ end
 # ptrs[k] is the start of chunk k (each is CHUNK_LEN = 1024 bytes).
 # All 16 blocks per chunk are full (1024 = 16×64). Returns 8 Vec{N,UInt32} chaining values.
 # This is the hot path that must vectorize (tagged for @assert_vectorized in test/).
+# Helper: returns Val{N} for the chunk count implied by the source type.
+@inline _cnf_val(::NTuple{N,Ptr{UInt8}}) where N = Val(N)
+@inline _cnf_val(::_BasePtr16) = Val(16)
+
+# Entry point: dispatch to body via Val{N} so N is a compile-time constant.
+# Accepts NTuple{N,Ptr{UInt8}} (all N, including N=8 test) or _BasePtr16 (N=16 hot path).
 function _compress_N_chunks_full(
-        ptrs::NTuple{N,Ptr{UInt8}},
+        ptrs,
+        key1::UInt32, key2::UInt32, key3::UInt32, key4::UInt32,
+        key5::UInt32, key6::UInt32, key7::UInt32, key8::UInt32,
+        chunk_counter::UInt64)
+    _compress_N_chunks_body(ptrs, _cnf_val(ptrs), key1,key2,key3,key4,key5,key6,key7,key8, chunk_counter)
+end
+
+function _compress_N_chunks_body(
+        ptrs, ::Val{N},
         key1::UInt32, key2::UInt32, key3::UInt32, key4::UInt32,
         key5::UInt32, key6::UInt32, key7::UInt32, key8::UInt32,
         chunk_counter::UInt64) where N
@@ -587,7 +618,7 @@ end
 # cv_stack: flat Vector{UInt32}, 8 words per entry, indexed by 1-based depth.
 # We merge when trailing zeros of total_chunks allow (binary tree structure).
 # Returns the new stack_len after push + any merges.
-function _cv_stack_push!(cv_stack::Vector{UInt32}, stack_len::Int,
+@inline function _cv_stack_push!(cv_stack::Vector{UInt32}, stack_len::Int,
         cv1::UInt32, cv2::UInt32, cv3::UInt32, cv4::UInt32,
         cv5::UInt32, cv6::UInt32, cv7::UInt32, cv8::UInt32,
         chunk_counter::UInt64)
@@ -721,9 +752,10 @@ function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
     # follow use chunk_counter directly; the final fold merges batch roots with scalar CVs
     # via the same _cv_stack_push! mechanism (proved correct for all chunk counts).
     while n > N * CHUNK_LEN
-        ptrs = _make_ptrs(p, Val(N))
+        # _BasePtr16 wraps the base pointer — avoids NTuple{16,Ptr} register pressure.
+        # _compress_N_chunks_full dispatches to the N=16 SIMD path.
         vcv1,vcv2,vcv3,vcv4,vcv5,vcv6,vcv7,vcv8 = _compress_N_chunks_full(
-            ptrs, KEY1,KEY2,KEY3,KEY4,KEY5,KEY6,KEY7,KEY8, chunk_counter)
+            _BasePtr16(p), KEY1,KEY2,KEY3,KEY4,KEY5,KEY6,KEY7,KEY8, chunk_counter)
 
         # Reduce 16 chunk CVs → 1 subtree root (3 SIMD + 1 scalar parent compress)
         # then push as a single virtual "batch chunk" using batch_counter.
