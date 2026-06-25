@@ -501,3 +501,28 @@ pub extern "C" fn bp_bumpalo_alloc3(n: usize) -> u64 {
     }
     acc
 }
+
+// Handle-based hashbrown: build the map ONCE, time each op on the handle (the build-included
+// bp_hashbrown_roundtrip was build-dominated, and compared with_capacity vs a no-sizehint Julia Dict).
+type HbMap = hashbrown::HashMap<u64, u64>;
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hb_build(data: *const u64, n: usize) -> *mut HbMap {
+    let xs = unsafe { std::slice::from_raw_parts(data, n) };
+    let mut m: HbMap = hashbrown::HashMap::with_capacity(n);
+    for (i, &x) in xs.iter().enumerate() { m.insert(x, i as u64); }
+    Box::into_raw(Box::new(m))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hb_free(h: *mut HbMap) { unsafe { drop(Box::from_raw(h)); } }
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hb_get_hits(h: *const HbMap, keys: *const u64, n: usize) -> u64 {
+    let m = unsafe { &*h };
+    let ks = unsafe { std::slice::from_raw_parts(keys, n) };
+    ks.iter().fold(0u64, |a, &x| a.wrapping_add(*m.get(&x).unwrap()))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hb_get_miss(h: *const HbMap, keys: *const u64, n: usize) -> u64 {
+    let m = unsafe { &*h };
+    let ks = unsafe { std::slice::from_raw_parts(keys, n) };
+    ks.iter().filter(|&&x| m.get(&x).is_some()).count() as u64
+}
