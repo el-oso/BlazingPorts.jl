@@ -52,7 +52,7 @@ const KEY5 = IV5; const KEY6 = IV6; const KEY7 = IV7; const KEY8 = IV8
     return a, b, c, d
 end
 
-# ── G mixing function (SIMD) ──────────────────────────────────────────────────────────────────────
+# ── G mixing function (SIMD, single) ─────────────────────────────────────────────────────────────
 # Same math, but each argument is Vec{N,UInt32}; lane k processes chunk k independently.
 # rotate-right via (x >> r) | (x << (32-r)) — no bitrotate on Vec.
 @inline function _g_simd(
@@ -67,6 +67,47 @@ end
     c = c + d
     b = (b ⊻ c); b = (b >> 7)  | (b << 25)
     return a, b, c, d
+end
+
+# ── Software-pipelined 4-way G (columns or diagonals) ────────────────────────────────────────────
+# Interleaves the 8 steps of 4 independent G calls to expose 4-way ILP to the backend.
+# The arithmetic is identical to 4 sequential _g_simd calls — only the statement order differs,
+# so byte-exactness is guaranteed.
+# ponytail: explicit 24-arg function avoids tuple boxing; LLVM sees all 4 chains at each step.
+@inline function _g4(
+        a1::V, b1::V, c1::V, d1::V, mx1::V, my1::V,
+        a2::V, b2::V, c2::V, d2::V, mx2::V, my2::V,
+        a3::V, b3::V, c3::V, d3::V, mx3::V, my3::V,
+        a4::V, b4::V, c4::V, d4::V, mx4::V, my4::V) where {V <: Vec}
+    # step 1: a = a + b + mx  (all 4, independent → 4-wide ILP)
+    a1=a1+b1+mx1; a2=a2+b2+mx2; a3=a3+b3+mx3; a4=a4+b4+mx4
+    # step 2: d = ror(d^a, 16)
+    d1=(d1⊻a1); d1=(d1>>16)|(d1<<16)
+    d2=(d2⊻a2); d2=(d2>>16)|(d2<<16)
+    d3=(d3⊻a3); d3=(d3>>16)|(d3<<16)
+    d4=(d4⊻a4); d4=(d4>>16)|(d4<<16)
+    # step 3: c = c + d
+    c1=c1+d1; c2=c2+d2; c3=c3+d3; c4=c4+d4
+    # step 4: b = ror(b^c, 12)
+    b1=(b1⊻c1); b1=(b1>>12)|(b1<<20)
+    b2=(b2⊻c2); b2=(b2>>12)|(b2<<20)
+    b3=(b3⊻c3); b3=(b3>>12)|(b3<<20)
+    b4=(b4⊻c4); b4=(b4>>12)|(b4<<20)
+    # step 5: a = a + b + my
+    a1=a1+b1+my1; a2=a2+b2+my2; a3=a3+b3+my3; a4=a4+b4+my4
+    # step 6: d = ror(d^a, 8)
+    d1=(d1⊻a1); d1=(d1>>8)|(d1<<24)
+    d2=(d2⊻a2); d2=(d2>>8)|(d2<<24)
+    d3=(d3⊻a3); d3=(d3>>8)|(d3<<24)
+    d4=(d4⊻a4); d4=(d4>>8)|(d4<<24)
+    # step 7: c = c + d
+    c1=c1+d1; c2=c2+d2; c3=c3+d3; c4=c4+d4
+    # step 8: b = ror(b^c, 7)
+    b1=(b1⊻c1); b1=(b1>>7)|(b1<<25)
+    b2=(b2⊻c2); b2=(b2>>7)|(b2<<25)
+    b3=(b3⊻c3); b3=(b3>>7)|(b3<<25)
+    b4=(b4⊻c4); b4=(b4>>7)|(b4<<25)
+    return a1,b1,c1,d1, a2,b2,c2,d2, a3,b3,c3,d3, a4,b4,c4,d4
 end
 
 # ── Scalar compress: 16-word output (spec §2.3) ───────────────────────────────────────────────────
@@ -248,69 +289,58 @@ function _compress_N_chunks_full(
         va16 = Vec{N,UInt32}(flags_scalar)
 
         # 7 rounds of SIMD G-mixes — same message schedule as scalar compress.
+        # Each half-round uses _g4: 4 independent G calls interleaved step-by-step
+        # so LLVM/the CPU back-end sees 4-way ILP at each arithmetic step rather
+        # than 4 sequential full dependency chains. Arithmetic is identical → byte-exact.
         # Round 1 — schedule [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
-        va1,va5,va9,va13   = _g_simd(va1,va5,va9,va13,   vm1,  vm2)
-        va2,va6,va10,va14  = _g_simd(va2,va6,va10,va14,  vm3,  vm4)
-        va3,va7,va11,va15  = _g_simd(va3,va7,va11,va15,  vm5,  vm6)
-        va4,va8,va12,va16  = _g_simd(va4,va8,va12,va16,  vm7,  vm8)
-        va1,va6,va11,va16  = _g_simd(va1,va6,va11,va16,  vm9,  vm10)
-        va2,va7,va12,va13  = _g_simd(va2,va7,va12,va13,  vm11, vm12)
-        va3,va8,va9,va14   = _g_simd(va3,va8,va9,va14,   vm13, vm14)
-        va4,va5,va10,va15  = _g_simd(va4,va5,va10,va15,  vm15, vm16)
+        va1,va5,va9,va13, va2,va6,va10,va14, va3,va7,va11,va15, va4,va8,va12,va16 =
+            _g4(va1,va5,va9,va13, vm1,vm2, va2,va6,va10,va14, vm3,vm4,
+                va3,va7,va11,va15, vm5,vm6, va4,va8,va12,va16, vm7,vm8)
+        va1,va6,va11,va16, va2,va7,va12,va13, va3,va8,va9,va14, va4,va5,va10,va15 =
+            _g4(va1,va6,va11,va16, vm9,vm10, va2,va7,va12,va13, vm11,vm12,
+                va3,va8,va9,va14, vm13,vm14, va4,va5,va10,va15, vm15,vm16)
         # Round 2 — schedule [2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8]
-        va1,va5,va9,va13   = _g_simd(va1,va5,va9,va13,   vm3,  vm7)
-        va2,va6,va10,va14  = _g_simd(va2,va6,va10,va14,  vm4,  vm11)
-        va3,va7,va11,va15  = _g_simd(va3,va7,va11,va15,  vm8,  vm1)
-        va4,va8,va12,va16  = _g_simd(va4,va8,va12,va16,  vm5,  vm14)
-        va1,va6,va11,va16  = _g_simd(va1,va6,va11,va16,  vm2,  vm12)
-        va2,va7,va12,va13  = _g_simd(va2,va7,va12,va13,  vm13, vm6)
-        va3,va8,va9,va14   = _g_simd(va3,va8,va9,va14,   vm10, vm15)
-        va4,va5,va10,va15  = _g_simd(va4,va5,va10,va15,  vm16, vm9)
+        va1,va5,va9,va13, va2,va6,va10,va14, va3,va7,va11,va15, va4,va8,va12,va16 =
+            _g4(va1,va5,va9,va13, vm3,vm7, va2,va6,va10,va14, vm4,vm11,
+                va3,va7,va11,va15, vm8,vm1, va4,va8,va12,va16, vm5,vm14)
+        va1,va6,va11,va16, va2,va7,va12,va13, va3,va8,va9,va14, va4,va5,va10,va15 =
+            _g4(va1,va6,va11,va16, vm2,vm12, va2,va7,va12,va13, vm13,vm6,
+                va3,va8,va9,va14, vm10,vm15, va4,va5,va10,va15, vm16,vm9)
         # Round 3 — schedule [3,4,10,12,13,2,7,14,6,5,9,0,11,15,8,1]
-        va1,va5,va9,va13   = _g_simd(va1,va5,va9,va13,   vm4,  vm5)
-        va2,va6,va10,va14  = _g_simd(va2,va6,va10,va14,  vm11, vm13)
-        va3,va7,va11,va15  = _g_simd(va3,va7,va11,va15,  vm14, vm3)
-        va4,va8,va12,va16  = _g_simd(va4,va8,va12,va16,  vm8,  vm15)
-        va1,va6,va11,va16  = _g_simd(va1,va6,va11,va16,  vm7,  vm6)
-        va2,va7,va12,va13  = _g_simd(va2,va7,va12,va13,  vm10, vm1)
-        va3,va8,va9,va14   = _g_simd(va3,va8,va9,va14,   vm12, vm16)
-        va4,va5,va10,va15  = _g_simd(va4,va5,va10,va15,  vm9,  vm2)
+        va1,va5,va9,va13, va2,va6,va10,va14, va3,va7,va11,va15, va4,va8,va12,va16 =
+            _g4(va1,va5,va9,va13, vm4,vm5, va2,va6,va10,va14, vm11,vm13,
+                va3,va7,va11,va15, vm14,vm3, va4,va8,va12,va16, vm8,vm15)
+        va1,va6,va11,va16, va2,va7,va12,va13, va3,va8,va9,va14, va4,va5,va10,va15 =
+            _g4(va1,va6,va11,va16, vm7,vm6, va2,va7,va12,va13, vm10,vm1,
+                va3,va8,va9,va14, vm12,vm16, va4,va5,va10,va15, vm9,vm2)
         # Round 4 — schedule [10,7,12,9,14,3,13,15,4,0,11,2,5,8,1,6]
-        va1,va5,va9,va13   = _g_simd(va1,va5,va9,va13,   vm11, vm8)
-        va2,va6,va10,va14  = _g_simd(va2,va6,va10,va14,  vm13, vm10)
-        va3,va7,va11,va15  = _g_simd(va3,va7,va11,va15,  vm15, vm4)
-        va4,va8,va12,va16  = _g_simd(va4,va8,va12,va16,  vm14, vm16)
-        va1,va6,va11,va16  = _g_simd(va1,va6,va11,va16,  vm5,  vm1)
-        va2,va7,va12,va13  = _g_simd(va2,va7,va12,va13,  vm12, vm3)
-        va3,va8,va9,va14   = _g_simd(va3,va8,va9,va14,   vm6,  vm9)
-        va4,va5,va10,va15  = _g_simd(va4,va5,va10,va15,  vm2,  vm7)
+        va1,va5,va9,va13, va2,va6,va10,va14, va3,va7,va11,va15, va4,va8,va12,va16 =
+            _g4(va1,va5,va9,va13, vm11,vm8, va2,va6,va10,va14, vm13,vm10,
+                va3,va7,va11,va15, vm15,vm4, va4,va8,va12,va16, vm14,vm16)
+        va1,va6,va11,va16, va2,va7,va12,va13, va3,va8,va9,va14, va4,va5,va10,va15 =
+            _g4(va1,va6,va11,va16, vm5,vm1, va2,va7,va12,va13, vm12,vm3,
+                va3,va8,va9,va14, vm6,vm9, va4,va5,va10,va15, vm2,vm7)
         # Round 5 — schedule [12,13,9,11,15,10,14,8,7,2,5,3,0,1,6,4]
-        va1,va5,va9,va13   = _g_simd(va1,va5,va9,va13,   vm13, vm14)
-        va2,va6,va10,va14  = _g_simd(va2,va6,va10,va14,  vm10, vm12)
-        va3,va7,va11,va15  = _g_simd(va3,va7,va11,va15,  vm16, vm11)
-        va4,va8,va12,va16  = _g_simd(va4,va8,va12,va16,  vm15, vm9)
-        va1,va6,va11,va16  = _g_simd(va1,va6,va11,va16,  vm8,  vm3)
-        va2,va7,va12,va13  = _g_simd(va2,va7,va12,va13,  vm6,  vm4)
-        va3,va8,va9,va14   = _g_simd(va3,va8,va9,va14,   vm1,  vm2)
-        va4,va5,va10,va15  = _g_simd(va4,va5,va10,va15,  vm7,  vm5)
+        va1,va5,va9,va13, va2,va6,va10,va14, va3,va7,va11,va15, va4,va8,va12,va16 =
+            _g4(va1,va5,va9,va13, vm13,vm14, va2,va6,va10,va14, vm10,vm12,
+                va3,va7,va11,va15, vm16,vm11, va4,va8,va12,va16, vm15,vm9)
+        va1,va6,va11,va16, va2,va7,va12,va13, va3,va8,va9,va14, va4,va5,va10,va15 =
+            _g4(va1,va6,va11,va16, vm8,vm3, va2,va7,va12,va13, vm6,vm4,
+                va3,va8,va9,va14, vm1,vm2, va4,va5,va10,va15, vm7,vm5)
         # Round 6 — schedule [9,14,11,5,8,12,15,1,13,3,0,10,2,6,4,7]
-        va1,va5,va9,va13   = _g_simd(va1,va5,va9,va13,   vm10, vm15)
-        va2,va6,va10,va14  = _g_simd(va2,va6,va10,va14,  vm12, vm6)
-        va3,va7,va11,va15  = _g_simd(va3,va7,va11,va15,  vm9,  vm13)
-        va4,va8,va12,va16  = _g_simd(va4,va8,va12,va16,  vm16, vm2)
-        va1,va6,va11,va16  = _g_simd(va1,va6,va11,va16,  vm14, vm4)
-        va2,va7,va12,va13  = _g_simd(va2,va7,va12,va13,  vm1,  vm11)
-        va3,va8,va9,va14   = _g_simd(va3,va8,va9,va14,   vm3,  vm7)
-        va4,va5,va10,va15  = _g_simd(va4,va5,va10,va15,  vm5,  vm8)
+        va1,va5,va9,va13, va2,va6,va10,va14, va3,va7,va11,va15, va4,va8,va12,va16 =
+            _g4(va1,va5,va9,va13, vm10,vm15, va2,va6,va10,va14, vm12,vm6,
+                va3,va7,va11,va15, vm9,vm13, va4,va8,va12,va16, vm16,vm2)
+        va1,va6,va11,va16, va2,va7,va12,va13, va3,va8,va9,va14, va4,va5,va10,va15 =
+            _g4(va1,va6,va11,va16, vm14,vm4, va2,va7,va12,va13, vm1,vm11,
+                va3,va8,va9,va14, vm3,vm7, va4,va5,va10,va15, vm5,vm8)
         # Round 7 — schedule [11,15,5,0,1,9,8,6,14,10,2,12,3,4,7,13]
-        va1,va5,va9,va13   = _g_simd(va1,va5,va9,va13,   vm12, vm16)
-        va2,va6,va10,va14  = _g_simd(va2,va6,va10,va14,  vm6,  vm1)
-        va3,va7,va11,va15  = _g_simd(va3,va7,va11,va15,  vm2,  vm10)
-        va4,va8,va12,va16  = _g_simd(va4,va8,va12,va16,  vm9,  vm7)
-        va1,va6,va11,va16  = _g_simd(va1,va6,va11,va16,  vm15, vm11)
-        va2,va7,va12,va13  = _g_simd(va2,va7,va12,va13,  vm3,  vm13)
-        va3,va8,va9,va14   = _g_simd(va3,va8,va9,va14,   vm4,  vm5)
-        va4,va5,va10,va15  = _g_simd(va4,va5,va10,va15,  vm8,  vm14)
+        va1,va5,va9,va13, va2,va6,va10,va14, va3,va7,va11,va15, va4,va8,va12,va16 =
+            _g4(va1,va5,va9,va13, vm12,vm16, va2,va6,va10,va14, vm6,vm1,
+                va3,va7,va11,va15, vm2,vm10, va4,va8,va12,va16, vm9,vm7)
+        va1,va6,va11,va16, va2,va7,va12,va13, va3,va8,va9,va14, va4,va5,va10,va15 =
+            _g4(va1,va6,va11,va16, vm15,vm11, va2,va7,va12,va13, vm3,vm13,
+                va3,va8,va9,va14, vm4,vm5, va4,va5,va10,va15, vm8,vm14)
 
         # Update running CV: XOR top half (va1..va8) with bottom half (va9..va16)
         cv1 = va1 ⊻ va9;  cv2 = va2 ⊻ va10
