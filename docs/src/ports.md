@@ -60,19 +60,27 @@ its bundled `.S` the crate falls back to 8-wide AVX2 and loses to our 16-wide. *
 isn't beating us — a hand-written assembly file is**, and that asm out-runs what *either* language's
 compiler emits by 13%.
 
-### Why the assembly is faster — and why no compiler closes it
+### Why the assembly is faster — it's stack spills, measured
 
 ![Register file: why hand-asm wins](assets/blake3_registers.png)
 
-The compress kernel fills **all 32 AVX-512 registers** (16 hash-state + 16 message words). We measured it
-directly with `code_native`: 32/32 zmm used, 53 spills — *register-saturated*. The tree-reduce is the same
-G-mixing; to hide it inside the compress's spare execution-port slots you'd need free registers, and there
-are none. Hand-asm packs the 32 by hand and interleaves the reduce; LLVM greedily spends all 32 on the
-compress's ILP and runs the reduce as a separate, exposed phase. We exhausted the alternatives to be sure:
-a faithful **recursive wide-stack reduction** (the crate's `compress_subtree` structure) is byte-exact and
-**identical** speed (0.925× vs 0.930×); an **8-way fused leaf** needs 64 registers, spills, and is *slower*
-(0.96×). It's not the algorithm, the cache, or the language — it's LLVM's register scheduling vs hand-asm,
-**the same wall Rust hits** (which is why blake3 ships a `.S` to get around it).
+We read blake3's own `.S` and put it next to our `code_native`, and the difference is **one number: spills.**
+The two kernels are otherwise identical in shape — 32 AVX-512 registers (16 hash-state + 16 message), the
+message **held register-to-register** (348 of blake3's 350 round adds are reg-to-reg — it does *not* reload),
+mixed in place:
+
+| | distinct zmm | stack spills |
+|---|---|---|
+| blake3 hand-asm `hash_many` | 32 | **~0** |
+| our `SIMD.jl` → LLVM | 32/32 | **57** |
+
+The asm hand-schedules so the live set never exceeds 32 — an exact fit, zero stack traffic. LLVM schedules
+the same operations for maximum instruction-level parallelism, overflows the 32-register file, and **spills
+to the stack 57 times.** That spill traffic is the 13%. It is **not** the algorithm, the cache, the language —
+and (correcting an earlier diagnosis here) it is **not the tree-reduce**: this is a *compress-only*
+measurement, the reduce never enters it. It's purely LLVM's allocator/scheduler choosing ILP-with-spills
+where the hand-asm chose exact-fit-no-spills — the same wall Rust's compiler hits, which is why blake3 ships
+a `.S`. Whether LLVM's 57 spills can be driven toward zero from Julia is the open follow-up.
 
 ### We chose to stay pure Julia — no assembly
 
