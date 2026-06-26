@@ -118,3 +118,16 @@ So this proposal is closed as a **documented ceiling**, not a feature request: p
 ~85–87% of hand-written assembly on register-saturated kernels and beats every compiler; the residual is
 hardware (32 registers) + LLVM scheduling, unreachable from any portable IR. The minor cross-lane-permute
 nicety (Option B) is the only thing that remains a plausible SIMD.jl PR, and it is not on the critical path.
+
+## Correction (2026-06-26) — the kernel gap is compress SPILLS, not the reduce
+
+Reading blake3's `.S` against our `code_native` overturned the premise of this whole proposal. The 3-way
+kernel measurement (Julia 7.46 vs asm 8.36) is **compress-only — the tree-reduce is never in it.** Both
+kernels use 32 zmm with the message **held register-to-register** (blake3: 348/350 round adds reg-to-reg —
+it does not reload, does not interleave a reduce). The only difference: **blake3 asm ≈ 0 stack spills, our
+LLVM compress = 57.** The asm hand-schedules to fit exactly 32 live; LLVM schedules for ILP, overflows, and
+spills. So there is no "fuse compress+reduce" feature to add — the reduce was a red herring; the residual is
+LLVM's register *allocation/scheduling* (spills) on the compress alone, which SIMD.jl cannot influence. The
+[[register_report]] diagnostic (StrictMode F31) is still the right takeaway. The actionable follow-up is not
+a SIMD.jl feature but a *codegen* one: can targeted memory-operand reloads (proven reachable via an
+empty-asm `~{memory}` clobber) relieve the live-set pressure and drive the 57 spills toward 0?
