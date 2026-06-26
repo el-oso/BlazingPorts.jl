@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="510" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
   <style>
     .ttl{font-size:18px;font-weight:700;fill:#222}
     .h{font-size:13px;font-weight:700;fill:#222}
@@ -6,64 +6,60 @@
     .sub{font-size:11px;fill:#555}
     .tag{font-size:11px;font-weight:700;fill:#fff}
   </style>
-  <text x="20" y="30" class="ttl">Why hand-asm beats LLVM by 13% — stack spills, not the reduce</text>
+  <text x="20" y="30" class="ttl">Where BLAKE3's 13% actually lives — the chained-loop allocation</text>
 
-  <!-- register file: 32 slots, all full -->
-  <text x="20" y="62" class="h">The compress needs exactly 32 registers — 16 state + 16 message, held and mixed in place:</text>
+  <!-- compute: beats asm -->
+  <text x="20" y="62" class="h">1. The compute (compress G-mix), message in registers — both fit 32 zmm, zero spills:</text>
+  <rect x="20" y="74" width="840" height="40" rx="6" fill="#2e8b57"/>
+  <text x="40" y="99" class="tag">COMPRESS — Julia / flat-IR: 8.6–9.0 GB/s   ·   0 spills   ·   FASTER than the asm's 8.4</text>
+  <text x="430" y="134" text-anchor="middle" class="sub" fill="#2e8b57" font-weight="700">Our compute already beats hand-written assembly. This is not the gap.</text>
+
+  <!-- the chained leaf -->
+  <text x="20" y="172" class="h">2. The chained leaf — the 16-block loop that also carries the 8-word chaining value across iterations:</text>
+  <!-- loop sketch -->
   <g>
-    <rect x="20" y="74" width="416" height="34" rx="5" fill="#2e8b57" opacity="0.18" stroke="#2e8b57"/>
-    <rect x="444" y="74" width="416" height="34" rx="5" fill="#3b6ea5" opacity="0.18" stroke="#3b6ea5"/>
+    <rect x="20" y="186" width="150" height="44" rx="6" fill="#eef2f7" stroke="#9aa7b5"/>
+    <text x="95" y="205" text-anchor="middle" class="lbl">block b</text>
+    <text x="95" y="221" text-anchor="middle" class="sub">transpose + compress</text>
+    <path d="M170 208 h40" stroke="#888" stroke-width="2" marker-end="url(#a)"/>
+    <rect x="210" y="186" width="150" height="44" rx="6" fill="#eef2f7" stroke="#9aa7b5"/>
+    <text x="285" y="205" text-anchor="middle" class="lbl">block b+1</text>
+    <text x="285" y="221" text-anchor="middle" class="sub">transpose + compress</text>
+    <path d="M360 208 h40" stroke="#888" stroke-width="2" marker-end="url(#a)"/>
+    <text x="410" y="212" class="sub">… ×16</text>
+    <!-- CV carry -->
+    <path d="M95 230 q95 40 190 0" stroke="#c0392b" stroke-width="2" fill="none" marker-end="url(#r)"/>
+    <text x="190" y="268" text-anchor="middle" class="sub" fill="#c0392b" font-weight="700">8 chaining-value registers held across every iteration</text>
   </g>
-  <g>
-    <g>
-      <rect x="26"  y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="51"  y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-      <rect x="77"  y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="102" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-      <rect x="128" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="153" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-      <rect x="179" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="204" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-      <rect x="230" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="255" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-      <rect x="281" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="306" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-      <rect x="332" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="357" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-      <rect x="383" y="80" width="22" height="22" rx="3" fill="#2e8b57"/><rect x="408" y="80" width="22" height="22" rx="3" fill="#2e8b57"/>
-    </g>
-    <g>
-      <rect x="450" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="475" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-      <rect x="501" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="526" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-      <rect x="552" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="577" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-      <rect x="603" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="628" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-      <rect x="654" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="679" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-      <rect x="705" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="730" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-      <rect x="756" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="781" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-      <rect x="807" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/><rect x="832" y="80" width="22" height="22" rx="3" fill="#3b6ea5"/>
-    </g>
+  <text x="470" y="205" class="lbl">A single block alone is 0 spills. But the loop</text>
+  <text x="470" y="223" class="lbl">body needs all 32 zmm AND must hold 8 CV</text>
+  <text x="470" y="241" class="lbl">across the back-edge → overflow → spills.</text>
+
+  <!-- variants table -->
+  <text x="20" y="300" class="h">We rebuilt the kernel in flat LLVM IR and measured six variants — the chained loop is a hard floor:</text>
+  <g class="sub" fill="#222">
+    <rect x="20" y="312" width="500" height="150" rx="8" fill="#fbfcfe" stroke="#d6dde6"/>
+    <text x="34" y="333">single block, compute only</text>            <text x="430" y="333" font-weight="700" fill="#2e8b57">0 spills</text>
+    <text x="34" y="356">16 blocks fully unrolled</text>               <text x="430" y="356">1612</text>
+    <text x="34" y="379">block loop (chaining value in phi)</text>     <text x="430" y="379" font-weight="700">52</text>
+    <text x="34" y="402">  + memory-clobber barrier</text>            <text x="430" y="402">56</text>
+    <text x="34" y="425">  + llvm.loop unroll/interleave off</text>   <text x="430" y="425">52</text>
+    <text x="34" y="448">  + constant rematerialization</text>        <text x="430" y="448">54</text>
   </g>
-  <text x="228" y="123" text-anchor="middle" class="sub" fill="#2e8b57" font-weight="700">16 = hash state</text>
-  <text x="652" y="123" text-anchor="middle" class="sub" fill="#3b6ea5" font-weight="700">16 = message words (held in registers — no reload)</text>
-  <text x="440" y="148" text-anchor="middle" class="lbl" font-weight="700">Both LLVM and the hand-asm do this. The difference is what happens when temporaries are needed.</text>
-
-  <!-- timelines -->
-  <text x="20" y="190" class="h">Same kernel, same 32 registers — the only difference is spills to the stack (measured via code_native / the .S):</text>
-
-  <!-- LLVM -->
-  <text x="20" y="222" class="lbl" font-weight="700">Julia / LLVM  (and pure-Rust — same compiler):</text>
-  <rect x="20" y="232" width="680" height="40" rx="6" fill="#c0392b"/>
-  <text x="360" y="257" text-anchor="middle" class="tag">COMPRESS — scheduled for max ILP → live set overflows 32 → 57 stack spills</text>
-  <g stroke="#fff" stroke-width="3" opacity="0.85">
-    <line x1="80" y1="234" x2="80" y2="270"/><line x1="170" y1="234" x2="170" y2="270"/>
-    <line x1="260" y1="234" x2="260" y2="270"/><line x1="450" y1="234" x2="450" y2="270"/>
-    <line x1="560" y1="234" x2="560" y2="270"/><line x1="650" y1="234" x2="650" y2="270"/>
-  </g>
-  <text x="715" y="257" class="sub" fill="#c0392b" font-weight="700">spills ≈ the 13%</text>
-
-  <!-- asm -->
-  <text x="20" y="312" class="lbl" font-weight="700">blake3 hand-written assembly:</text>
-  <rect x="20" y="322" width="680" height="40" rx="6" fill="#708090"/>
-  <text x="360" y="347" text-anchor="middle" class="tag">COMPRESS — hand-scheduled so live set never exceeds 32 → ~0 spills</text>
-  <text x="715" y="347" class="sub" fill="#708090" font-weight="700">clean</text>
 
   <!-- takeaway -->
-  <rect x="20" y="388" width="840" height="98" rx="10" fill="#fbfcfe" stroke="#d6dde6"/>
-  <text x="38" y="414" class="h">The 13% is those 57 stack round-trips — pure scheduling, and measured compress-only (no reduce).</text>
-  <text x="38" y="437" class="lbl">Both keep all 16 message words in registers (register-to-register, in place). LLVM schedules aggressively for</text>
-  <text x="38" y="456" class="lbl">instruction-level parallelism, overflows the 32-register file, and spills 57× to the stack; the hand-asm picks a</text>
-  <text x="38" y="478" class="sub" fill="#2e8b57" font-weight="700">tighter schedule that fits exactly, zero spills. We stay pure Julia: 87% of hand-asm, faster than every compiler (incl. Rust).</text>
+  <rect x="540" y="312" width="320" height="150" rx="8" fill="#708090"/>
+  <text x="556" y="338" class="tag" font-size="12">The asm wins one thing only:</text>
+  <text x="556" y="362" fill="#eef2f7" class="sub">it hand-allocates all 32 registers across the</text>
+  <text x="556" y="380" fill="#eef2f7" class="sub">whole 16-block chained loop, zero spills.</text>
+  <text x="556" y="406" fill="#fff" class="sub" font-weight="700">LLVM spills ~52 from any frontend —</text>
+  <text x="556" y="424" fill="#fff" class="sub" font-weight="700">Julia or hand-written portable IR alike.</text>
+  <text x="556" y="450" fill="#cdd6df" class="sub">Not the compute. Not the reduce. Not the language.</text>
+
+  <text x="20" y="490" class="sub" fill="#555">Bottom line: our BLAKE3 computes faster than hand-tuned assembly; the asm's only edge is register-allocating the input plumbing — which no compiler reproduces.</text>
+
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#888"/></marker>
+    <marker id="r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="#c0392b"/></marker>
+  </defs>
 </svg>

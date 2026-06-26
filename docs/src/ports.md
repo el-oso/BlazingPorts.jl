@@ -60,27 +60,44 @@ its bundled `.S` the crate falls back to 8-wide AVX2 and loses to our 16-wide. *
 isn't beating us — a hand-written assembly file is**, and that asm out-runs what *either* language's
 compiler emits by 13%.
 
-### Why the assembly is faster — it's stack spills, measured
+### Why the assembly is faster — and where the gap *actually* lives
 
 ![Register file: why hand-asm wins](assets/blake3_registers.png)
 
-We read blake3's own `.S` and put it next to our `code_native`, and the difference is **one number: spills.**
-The two kernels are otherwise identical in shape — 32 AVX-512 registers (16 hash-state + 16 message), the
-message **held register-to-register** (348 of blake3's 350 round adds are reg-to-reg — it does *not* reload),
-mixed in place:
+We read blake3's own `.S` next to our `code_native`, then decomposed our kernel layer by layer — and the
+real picture is **more favorable than the 13% suggests.** It took correcting two wrong guesses to find it
+(first we blamed the tree-reduce; then the compress kernel; both wrong).
 
-| | distinct zmm | stack spills |
+The asm holds the message **in registers** (348 of its 350 round adds are register-to-register — it does
+*not* reload), exactly like ours; both use all 32 zmm. So the only difference is **stack spills**: ~0 in the
+asm, ~52–57 in ours. But *where* those spills come from is the finding:
+
+- **The compress G-mix alone — message in registers — is `0 spills` and runs at 8.6–9.0 GB/s, *faster than
+  the asm's full pipeline (8.4)`.** Our *compute* already beats hand-written assembly. (Confirmed in plain
+  SIMD.jl **and** in hand-written flat LLVM IR — both spill-free.)
+- **Every spill is in the *chained leaf*** — the 16-block loop that transposes the input into lanes and
+  carries the 8-word chaining value across iterations. Holding those 8 CV registers across a loop body that
+  already needs all 32 overflows the file. The asm hand-allocates the entire 16-block sequence into 32
+  registers with zero spills; LLVM won't — and **neither Julia nor hand-written portable LLVM IR moves it.**
+
+We pushed this to exhaustion. We rebuilt the kernel as flat LLVM IR and measured six structural variants of
+the chained leaf:
+
+| variant | spills | GB/s |
 |---|---|---|
-| blake3 hand-asm `hash_many` | 32 | **~0** |
-| our `SIMD.jl` → LLVM | 32/32 | **57** |
+| single block, compute only | **0** | 8.6–9.0 |
+| 16 blocks fully unrolled | 1612 | — |
+| block loop (chaining value in phi) | 52 | 7.5 |
+| + memory-clobber barrier | 56 | 7.5 |
+| + `llvm.loop` unroll/interleave-disable | 52 | 7.5 |
+| + constant rematerialization | 54 | 7.5 |
 
-The asm hand-schedules so the live set never exceeds 32 — an exact fit, zero stack traffic. LLVM schedules
-the same operations for maximum instruction-level parallelism, overflows the 32-register file, and **spills
-to the stack 57 times.** That spill traffic is the 13%. It is **not** the algorithm, the cache, the language —
-and (correcting an earlier diagnosis here) it is **not the tree-reduce**: this is a *compress-only*
-measurement, the reduce never enters it. It's purely LLVM's allocator/scheduler choosing ILP-with-spills
-where the hand-asm chose exact-fit-no-spills — the same wall Rust's compiler hits, which is why blake3 ships
-a `.S`. Whether LLVM's 57 spills can be driven toward zero from Julia is the open follow-up.
+All six chained variants land at the same ~7.5 GB/s. So the 13% is **not** the algorithm, the cache, the
+language, the tree-reduce, or the compress kernel — it is one thing: the **global register allocation of the
+chained block loop**, a hand-tuning the asm performs and no compiler reproduces from any frontend. The honest
+one-liner: *our BLAKE3 computes faster than hand-tuned assembly; the asm's only remaining edge is a
+register-allocation trick on the input plumbing.* (StrictMode's `register_report` diagnostic — F31 — came
+out of this hunt.)
 
 ### We chose to stay pure Julia — no assembly
 
