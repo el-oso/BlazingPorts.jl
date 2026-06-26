@@ -9,8 +9,8 @@ StrictMode = "0e98b4f4-d0e6-42ac-af0a-707c24852f32"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TypeContracts = "c7a3f1e2-84b5-4d69-9e0a-1f2b3c4d5e6f"
 
-[sources]
-StrictMode = {path = "../../StrictMode.jl"}
+[compat]
+StrictMode = "0.3"
 
 [preferences.StrictMode]
 analysis = "full"
