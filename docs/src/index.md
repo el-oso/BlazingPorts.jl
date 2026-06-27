@@ -19,6 +19,7 @@ fundamental trade-off. Every result below is single-threaded (`julia -t 1`, `tas
 | **hashbrown** | `SwissDict <: AbstractDict` (ours) | miss **2.5× faster**, hit 0.55× | ⚖️ **Trade-off** |
 | **blake3** | `Blake3` (ours) | **compute beats pure-Rust 1.60× AND the bundled hand-asm** (8.6–9.0 vs 8.4 GB/s, 0 spills); full pipeline trails 13%, entirely the chained-loop register allocation; 7.4× over Julia ecosystem | ✅ **Beats Rust & asm on compute** (pure Julia) |
 | **simd-json** | JSON.jl ≥1.6 + stage-1 SIMD POC (fork) | tape 0.66×; stage-1 kernel ~28× scalar; **~4× simd-json on long-string JSON**, ~0.85× short | ⚠ **Gap / POC** (+ fixed StrictMode F32) |
+| **regex** | Base `Regex` (PCRE2, C) | regex crate **13×** (alternation) / **54×** (backtracking+anchor); 1.3–1.5× simple patterns | ⚠ **Gap** — but PCRE2(C)-vs-Rust; pure-Julia engine is a massive port |
 | **ryu** | `Base.Ryu.writeshortest` | 0.76–2.05× (value-dependent) | ⏭ Skip — Base ships it |
 | **roaring** | `Base.BitSet` | value-dependent (membership wins) | ⏭ Skip |
 | **bumpalo** | `Bumper.jl` | parity + true zero-GC | ⏭ Skip — ecosystem has it |

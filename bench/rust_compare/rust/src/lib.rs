@@ -636,3 +636,23 @@ pub extern "C" fn bp_simdjson_parse(data: *const u8, len: usize, scratch: *mut u
 pub extern "C" fn bp_simdjson_memcpy(data: *const u8, len: usize, scratch: *mut u8) -> u8 {
     unsafe { std::ptr::copy_nonoverlapping(data, scratch, len); *scratch }
 }
+
+// ── regex (Tier 3 GP): lazy-DFA + SIMD literal prefilter (Teddy/memchr). Single-thread. ──────────────
+// Build a compiled regex handle once (compilation is one-time), then count non-overlapping matches over
+// a haystack — so the probe times MATCH throughput, not compile. Compared to Julia's Base `Regex`
+// (PCRE2, a C lib) doing `count(eachmatch(...))`.
+use regex::Regex as RRegex;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_regex_build(pat: *const u8, plen: usize) -> *mut RRegex {
+    let s = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(pat, plen) }) { Ok(s) => s, Err(_) => return std::ptr::null_mut() };
+    match RRegex::new(s) { Ok(r) => Box::into_raw(Box::new(r)), Err(_) => std::ptr::null_mut() }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_regex_count(h: *const RRegex, hay: *const u8, hlen: usize) -> usize {
+    let r = unsafe { &*h };
+    let s = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(hay, hlen)) };
+    r.find_iter(s).count()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_regex_free(h: *mut RRegex) { unsafe { drop(Box::from_raw(h)); } }

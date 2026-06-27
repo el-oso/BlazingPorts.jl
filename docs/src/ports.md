@@ -153,6 +153,22 @@ isn't the bottleneck there) — full size-sweep in the fork's `perf/string_scan_
 `@assert_no_scalar_loops` was blind to a scalar loop coexisting with vectorized code. Reproduce:
 `bench/probe_simdjson.jl` → `bench/results/simdjson.json` → `bench/plot_simdjson.jl`.
 
+## regex / ripgrep → ⚠ large gap, but PCRE2(C)-vs-Rust (not Julia-vs-Rust)
+
+Julia's `Regex` is **PCRE2** (a JIT'd C library); the Rust `regex` crate is a lazy-DFA with a Teddy/memchr
+SIMD literal prefilter. Match throughput over an 8 MiB corpus (compile-once; the fair Julia baseline is an
+allocation-free `Base.PCRE.exec` loop, since `eachmatch` allocates a match object per hit):
+
+![regex: Rust regex crate vs PCRE2, by pattern](assets/regex.png)
+
+The crate wins **exactly where its architecture is built to**: **alternation** `(alpha|bravo|charlie|delta|echo)`
+**13×** (Teddy multi-literal SIMD prefilter), and a **backtracking-prone pattern with a literal anchor**
+`[a-z]{3,8}@[a-z]{3,8}\.com` **54×** (DFA — no backtracking — plus a prefilter on `@`/`.com`; PCRE2 backtracks
+at every position). On simple patterns it's modest (literal `1.5×`, digit-class `1.3×`). A genuine, large gap —
+but **faer-flavored: the baseline is PCRE2 (C), not Julia code**, so it's a C-lib-vs-Rust-lib gap, not a
+language one. The "Julia answer" would be a pure-Julia DFA+prefilter engine (RE2/regex-crate class) — a massive
+port with no competitive pure-Julia regex in the ecosystem. **Document-skip as a port; record the gap.**
+
 ## hashbrown → `SwissDict` — ⚖️ a fundamental trade-off
 
 Reading Base's `dict.jl` reframed this: **Base `Dict` is already a SwissTable** (control bytes = h2,
