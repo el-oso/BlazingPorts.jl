@@ -8,6 +8,25 @@ The point isn't to win benchmarks — it's to find where StrictMode's performanc
 miss, or need a new lever. See [`RESULTS.md`](RESULTS.md) for the verdict table and findings (the
 in-repo source of truth), and the cross-project index `../blazingly-fast-rust-crates.md`.
 
+## Status (start here)
+
+Probe-first campaign, **mostly complete.** Most crates **document-skip** — Base/stdlib/ecosystem already win or
+match (matrixmultiply, exp/log/erf/gamma, glam/nalgebra, ndarray, rand, argmin, ryu, roaring, fxhash/ahash,
+memchr-byte). Julia ports shipped only where a *fair re-probe* found a real gap:
+
+- **`Factorizations` (faer Cholesky + QR)** — beats faer at **all** sizes 256–2048, pure SIMD.jl, no asm. The win
+  was the gemm *orchestration choice* (read the large operand in place), not codegen. Done.
+- **`Blake3`** — beats blake3's **pure-Rust** path 1.60×; 0.71× the bundled **hand-asm** crate (the 13% = the
+  chained-leaf's global register allocation, which no compiler frontend reproduces — stay pure Julia). Done.
+- **`StringSearch` (memchr substring)** — parity-to-beat vs memmem; **`IntFormat` (itoa)** — beats the crate. Done.
+- **`SwissDict` (hashbrown)** — `<:AbstractDict`; wins **miss-heavy** workloads, loses hit-heavy (a workload
+  tradeoff, not a clean win). Done.
+
+**Canonical state:** [`RESULTS.md`](RESULTS.md) (in-repo verdicts + the faer detail) and the cross-project tracker
+[`../blazingly-fast-rust-crates.md`](../blazingly-fast-rust-crates.md) (every crate + gap log + next probes).
+**Open threads:** `Base.Ryu` serial-divchain PR (drafted, unfiled); SwissDict **group-aligned probing** (to win
+hits too — hashbrown's design; aligns insert+lookup together).
+
 ## Probe-first
 
 For each crate we **first benchmark current Julia** (Base / stdlib / ecosystem) against the Rust
