@@ -9,6 +9,7 @@ makedocs(;
         repo = "https://github.com/el-oso/BlazingPorts.jl",
         devbranch = "master",
         devurl = "dev",
+        sidebar_drawer = true,   # render the navbar SidebarDrawerToggle (collapse the left menu on desktop)
     ),
     pages = [
         "Overview" => "index.md",
