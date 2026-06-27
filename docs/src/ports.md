@@ -153,20 +153,23 @@ isn't the bottleneck there) — full size-sweep in the fork's `perf/string_scan_
 `@assert_no_scalar_loops` was blind to a scalar loop coexisting with vectorized code. Reproduce:
 `bench/probe_simdjson.jl` → `bench/results/simdjson.json` → `bench/plot_simdjson.jl`.
 
-## simdutf8 → `Utf8` — ✅ PORTED: pure-Julia SIMD validator, 6× Base on multibyte (+ StrictMode F33)
+## simdutf8 → `Utf8` — ✅ PORTED: pure-Julia SIMD validator that **beats the Rust crate** on multibyte
 
 The probe found an 11× gap: Julia's `isvalid` SIMD-checks the ASCII fast-path but **falls to scalar the
-moment multibyte appears** (1.65 vs simdutf8 17.7 GB/s). Unlike regex (PCRE2 is C) this is a genuine
+moment multibyte appears** (1.66 vs simdutf8 18 GB/s). Unlike regex (PCRE2 is C) this is a genuine
 *pure-Julia* gap — so we **ported it**: `BlazingPorts.Utf8.isvalid_utf8`, the lemire/simdjson algorithm
-(three `pshufb` nibble-lookup tables + range checks via `Vec{16,UInt8}` `<16 x i8>` + an `llvmcall`
-`pshufb` primitive). **Byte-exact with `Base.isvalid`** (~93k random + crafted cases: overlong, surrogate,
-truncated, too-large, block-straddling). 16 MiB, single-thread:
+(three `pshufb` nibble-lookup tables + range checks via `Vec{32,UInt8}` `<32 x i8>` AVX2, with `llvmcall`
+`vpshufb`/`usub.sat`/`vpmovmskb` primitives + cross-lane `shufflevector` carries). **Byte-exact with
+`Base.isvalid`** (~93k random + crafted cases: overlong, surrogate, truncated, too-large, block-straddling;
+`@testitem` 62262/62262). 16 MiB, single-thread:
 
 ![UTF-8 validation: our SIMD validator vs Base & simdutf8](assets/simdutf8.png)
 
-- **Mixed UTF-8 (multibyte): `isvalid_utf8` 9.8 vs Base 1.66 GB/s = 5.9× faster** (0.56× simdutf8 — the
-  residual is SSE-16 vs its AVX2-32; an N=32 widening would roughly close it).
-- **ASCII fast-path: ~parity** with Base (both bandwidth-bound; the chunked `movemask` ASCII check).
+- **Mixed UTF-8 (multibyte): `isvalid_utf8` 18.6 vs Base 1.66 GB/s = 11× faster, and 1.04× simdutf8 — it
+  beats the Rust crate.** (The first cut was SSE-16 at 0.56× simdutf8; widening to AVX2 `Vec{32}` cleared
+  the gap — `shufflevector` handles the cross-128-lane byte-shift that the C uses `valignr`+`permute2x128`
+  for, and the 16-byte `pshufb` tables are duplicated across both lanes.)
+- **ASCII fast-path: parity** with Base (~71 GB/s, bandwidth-bound; the chunked `vpmovmskb` ASCII check).
 
 This is a SHUFFLE/LOOKUP kernel (≈0 arithmetic intensity), and auditing it produced **StrictMode F33**:
 `kernel_report` counts FP/int arithmetic + memory ops but **not** the `pshufb` shuffles — the kernel's

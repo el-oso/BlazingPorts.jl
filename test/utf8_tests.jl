@@ -46,11 +46,11 @@ end
     using SIMD: Vec
     using StrictMode, AllocCheck, JET
 
-    input = Vec{16,UInt8}(ntuple(i -> UInt8(0xE0 + (i % 16)), 16))
-    prev1 = Vec{16,UInt8}(ntuple(i -> UInt8(0x80 + (i % 16)), 16))
+    input = Vec{32,UInt8}(ntuple(i -> UInt8(0xE0 + (i % 16)), 32))
+    prev1 = Vec{32,UInt8}(ntuple(i -> UInt8(0x80 + (i % 16)), 32))
     U._check_special(input, prev1)                              # warm
 
-    # The kernel must lower to vector ops (<16 x i8>) and not allocate.
+    # The kernel must lower to vector ops (<32 x i8>) and not allocate.
     @assert_vectorized U._check_special(input, prev1)
     @assert_noalloc    U._check_special(input, prev1)
     @assert_typestable U._check_special(input, prev1)
@@ -60,6 +60,6 @@ end
     # it mischaracterizes a perfectly-vectorized shuffle kernel (the conjectured "data-movement" blind spot).
     if isdefined(StrictMode, :kernel_report)
         @info "kernel_report on the UTF-8 shuffle kernel (F33 probe)" report = sprint(show,
-            StrictMode.kernel_report(U._check_special, (Vec{16,UInt8}, Vec{16,UInt8})))
+            StrictMode.kernel_report(U._check_special, (Vec{32,UInt8}, Vec{32,UInt8})))
     end
 end
