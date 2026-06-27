@@ -203,6 +203,26 @@ synthesize and Julia's stdlib codes scalar. Together these form a **coherent clu
 byte-transcoding/validation library (utf8 + base64 + hex) would be both a real ecosystem contribution and the
 ideal StrictMode shuffle-kernel feedback vehicle.
 
+### ✅ PORTED `BlazingPorts.ByteOps` — and the "27× gap" was a measurement artifact
+
+We ported the encoders (`base64_encode!`, `hex_encode!`; decode follows), and measured them the way
+discipline #2 demands — **kernel-only, both sides writing into a preallocated buffer** (no output allocation
+in the timed region). The picture inverts:
+
+![Ported byte-ops kernels vs Rust crates, kernel-only](assets/byteops_ports.png)
+
+- **base64 encode: ours 19.9 vs `base64-simd` 11.7 GB/s = 1.70× — the pure-Julia kernel beats the crate**
+  (27× over `Base64.base64encode`). Muła AVX2 (offset-load + asymmetric `vpshufb`, no cross-lane `vpermd`).
+- **hex encode: ours 14.0 vs `faster-hex` 14.3 GB/s = 0.98× (parity)**, 7× over `bytes2hex`.
+
+The "27× base64 gap" from the probe above was **not a kernel gap** — it timed a 21 MiB `Vector` allocation +
+`String()` + forced GC *inside* the loop. Three attempts to "fix the kernel" (removing the `vpermd`, a 2×
+unroll, dropping a redundant `vpblendvb`) each moved throughput ~0%; only isolating the kernel from the
+allocator revealed the 1.7× win. Campaign lesson #1 (most gaps are measurement artifacts) live, and an
+F25-class reminder that every static StrictMode guarantee stayed green while the *measurement* lied.
+Byte-exact with `Base64.base64encode` / `bytes2hex`; F33 shuffle kernels. Reproduce:
+`bench/probe_byteops_ports.jl` → `bench/results/byteops_ports.json` → `bench/plot_byteops_ports.jl`.
+
 ## regex / ripgrep → ⚠ large gap, but PCRE2(C)-vs-Rust (not Julia-vs-Rust)
 
 Julia's `Regex` is **PCRE2** (a JIT'd C library); the Rust `regex` crate is a lazy-DFA with a Teddy/memchr

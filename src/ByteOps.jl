@@ -19,14 +19,17 @@ shuffle-port-bound kernel).
 """
 module ByteOps
 
-using SIMD: Vec, vload, vstore
+using SIMD: Vec, vload, vstore, shufflevector
 
-export base64_encode, base64_encode!
+export base64_encode, base64_encode!, hex_encode, hex_encode!
 
 # ── AVX2 SIMD primitives via llvmcall ────────────────────────────────────────────────────────────────
 const _V32 = NTuple{32, VecElement{UInt8}}
 const _V16w = NTuple{16, VecElement{UInt16}}
 _bin(intr, t) = ("declare $t @$intr($t, $t)\ndefine $t @e($t %a, $t %b) #0 {\n%r = call $t @$intr($t %a, $t %b)\nret $t %r\n}\nattributes #0 = { alwaysinline }", "e")
+const _PSHUFB16 = _bin("llvm.x86.ssse3.pshuf.b.128", "<16 x i8>")
+const _V16 = NTuple{16, VecElement{UInt8}}
+@inline _pshufb16(t::Vec{16,UInt8}, i::Vec{16,UInt8}) = Vec(Base.llvmcall(_PSHUFB16, _V16, Tuple{_V16,_V16}, t.data, i.data))
 const _PSHUFB = _bin("llvm.x86.avx2.pshuf.b", "<32 x i8>")
 const _USUB   = _bin("llvm.usub.sat.v32i8", "<32 x i8>")
 const _MULHU  = _bin("llvm.x86.avx2.pmulhu.w", "<16 x i16>")
@@ -110,6 +113,48 @@ function base64_encode!(out::Vector{UInt8}, data::DenseVector{UInt8})
     out
 end
 base64_encode!(out::Vector{UInt8}, data::AbstractVector{UInt8}) = base64_encode!(out, collect(data))
+
+# ── hex encode (N=16: two pshufb nibble lookups + a shufflevector interleave) ────────────────────────
+const _HEXLUT = Vec{16,UInt8}(ntuple(i -> UInt8(b"0123456789abcdef"[i]), 16))
+const _LOW16 = Vec{16,UInt8}(0x0F)
+const _ILO = Val(ntuple(j -> iseven(j - 1) ? (j - 1) ÷ 2 : 16 + (j - 1) ÷ 2, 16))   # interleave low half
+const _IHI = Val(ntuple(j -> iseven(j - 1) ? 8 + (j - 1) ÷ 2 : 24 + (j - 1) ÷ 2, 16)) # interleave high half
+const _HEXCH = b"0123456789abcdef"
+
+@inline function _hex16(v::Vec{16,UInt8})               # 16 bytes → 32 lowercase hex chars (two halves)
+    hc = _pshufb16(_HEXLUT, v >> 0x04); lc = _pshufb16(_HEXLUT, v & _LOW16)
+    (shufflevector(hc, lc, _ILO), shufflevector(hc, lc, _IHI))
+end
+
+"""
+    hex_encode!(out::Vector{UInt8}, data::AbstractVector{UInt8}) -> out
+
+Lowercase hex into preallocated `out` (`2*length(data)` bytes). Byte-exact with `bytes2hex`. 0-alloc.
+"""
+function hex_encode!(out::Vector{UInt8}, data::DenseVector{UInt8})
+    n = length(data)
+    GC.@preserve data out begin
+        p = pointer(data); q = pointer(out); i = 0; o = 0
+        @inbounds while i + 16 <= n
+            a, b = _hex16(vload(Vec{16,UInt8}, p + i)); vstore(a, q + o); vstore(b, q + o + 16); i += 16; o += 32
+        end
+        @inbounds while i < n
+            v = data[i+1]; out[o+1] = _HEXCH[(v >> 4) + 1]; out[o+2] = _HEXCH[(v & 0x0f) + 1]; i += 1; o += 2
+        end
+    end
+    out
+end
+hex_encode!(out::Vector{UInt8}, data::AbstractVector{UInt8}) = hex_encode!(out, collect(data))
+
+"""
+    hex_encode(data) -> String
+
+Allocating convenience wrapper over [`hex_encode!`](@ref).
+"""
+function hex_encode(data::DenseVector{UInt8})
+    out = Vector{UInt8}(undef, 2 * length(data)); hex_encode!(out, data); String(out)
+end
+hex_encode(data::AbstractVector{UInt8}) = hex_encode(collect(data))
 
 """
     base64_encode(data) -> String

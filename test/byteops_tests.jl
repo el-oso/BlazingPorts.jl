@@ -23,6 +23,21 @@
     @test (@allocated base64_encode!(out, big)) == 0
 end
 
+@testitem "hex_encode_correctness" tags = [:byteops] begin
+    using BlazingPorts.ByteOps: hex_encode, hex_encode!
+    using Random
+    for L in 0:200
+        b = rand(UInt8, L); @test hex_encode(b) == bytes2hex(b)
+    end
+    Random.seed!(0x4EE)
+    for _ in 1:20000
+        b = rand(UInt8, rand(0:400)); @test hex_encode(b) == bytes2hex(b)
+    end
+    big = rand(UInt8, 64 * 1024); out = Vector{UInt8}(undef, 2 * length(big))
+    hex_encode!(out, big); @test String(copy(out)) == bytes2hex(big)
+    hex_encode!(out, big); @test (@allocated hex_encode!(out, big)) == 0
+end
+
 @testitem "base64_strictmode" tags = [:byteops] begin
     # The base64 block kernel is a SHUFFLE/LOOKUP kernel (vpshufb reshuffle + vpshufb LUT translate +
     # vpmulhuw bit-spread). Audit it AND re-probe F33 (kernel_report blindness to shuffle ops) at <32 x i8>.
