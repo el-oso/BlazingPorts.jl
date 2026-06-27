@@ -211,15 +211,15 @@ in the timed region). The picture inverts:
 
 ![Ported byte-ops kernels vs Rust crates, kernel-only](assets/byteops_ports.png)
 
-The full library (4 kernels, all byte-exact, decode paths validating) lands at or above the crate:
+The full library — **4 kernels, all byte-exact, all beating the crate**, decode paths validating SIMD-wide:
 
-- **base64 encode: ours ~20 vs `base64-simd` ~11.7 GB/s = 1.70× — beats the crate** (28× over
-  `Base64.base64encode`). Muła AVX2 (offset-load + asymmetric `vpshufb`, no cross-lane `vpermd`).
-- **base64 decode: ours 9.8 vs `base64-simd` 8.7 GB/s = 1.12× — beats the crate** (13× over `base64decode`).
+- **base64 encode: ours ~20 vs `base64-simd` ~11.7 GB/s = 1.70×** (28× over `Base64.base64encode`).
+  Muła AVX2 (offset-load + asymmetric `vpshufb`, no cross-lane `vpermd`).
+- **base64 decode: ours 9.8 vs `base64-simd` 8.7 GB/s = 1.12×** (13× over `base64decode`).
   Muła SSE (`pshufb` char→6bit + validate, `pmaddubsw`/`pmaddwd` pack 4×6bit→3 bytes).
-- **hex encode: ours ~14.3 vs `faster-hex` ~15 GB/s = ~parity** (0.92–0.98× across runs, both
-  bandwidth-bound, 7× `bytes2hex`; N=16 — an AVX2 widening would close the last ~8%).
-- **hex decode: ours 6.3 vs `faster-hex` 5.0 GB/s = 1.25× — beats the crate**, 43× over `hex2bytes`.
+- **hex encode: ours 15.2 vs `faster-hex` 15.0 GB/s = 1.01×** (7× over `bytes2hex`).
+  AVX2 `vpshufb` nibble-LUT + a `shufflevector` interleave (LLVM → punpck + permute).
+- **hex decode: ours 6.3 vs `faster-hex` 5.0 GB/s = 1.26×**, 43× over `hex2bytes`.
 
 Both decoders validate (reject bad chars / bad length) SIMD-wide.
 

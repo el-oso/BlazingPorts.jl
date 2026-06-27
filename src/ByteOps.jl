@@ -132,6 +132,15 @@ const _HEXCH = b"0123456789abcdef"
     hc = _pshufb16(_HEXLUT, v >> 0x04); lc = _pshufb16(_HEXLUT, v & _LOW16)
     (shufflevector(hc, lc, _ILO), shufflevector(hc, lc, _IHI))
 end
+# AVX2 path: 32 bytes → 64 hex chars. Per-lane vpshufb (LUT duplicated across both 128-lanes) + a
+# shufflevector interleave (LLVM lowers it to punpck + permute), no extra cross-lane op.
+const _HEXLUT32 = Vec{32,UInt8}((ntuple(i -> UInt8(b"0123456789abcdef"[i]), 16)..., ntuple(i -> UInt8(b"0123456789abcdef"[i]), 16)...))
+const _ILO32 = Val(ntuple(j -> iseven(j - 1) ? (j - 1) ÷ 2 : 32 + (j - 1) ÷ 2, 32))    # chars for input bytes 0..15
+const _IHI32 = Val(ntuple(j -> iseven(j - 1) ? 16 + (j - 1) ÷ 2 : 48 + (j - 1) ÷ 2, 32)) # bytes 16..31
+@inline function _hex32(v::Vec{32,UInt8})
+    hc = _pshufb(_HEXLUT32, v >> 0x04); lc = _pshufb(_HEXLUT32, v & Vec{32,UInt8}(0x0F))
+    (shufflevector(hc, lc, _ILO32), shufflevector(hc, lc, _IHI32))
+end
 
 """
     hex_encode!(out::Vector{UInt8}, data::AbstractVector{UInt8}) -> out
@@ -142,7 +151,10 @@ function hex_encode!(out::Vector{UInt8}, data::DenseVector{UInt8})
     n = length(data)
     GC.@preserve data out begin
         p = pointer(data); q = pointer(out); i = 0; o = 0
-        @inbounds while i + 16 <= n
+        @inbounds while i + 32 <= n                       # AVX2: 32 bytes → 64 chars
+            a, b = _hex32(vload(Vec{32,UInt8}, p + i)); vstore(a, q + o); vstore(b, q + o + 32); i += 32; o += 64
+        end
+        @inbounds while i + 16 <= n                       # SSE remainder
             a, b = _hex16(vload(Vec{16,UInt8}, p + i)); vstore(a, q + o); vstore(b, q + o + 16); i += 16; o += 32
         end
         @inbounds while i < n

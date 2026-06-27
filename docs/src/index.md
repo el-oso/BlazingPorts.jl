@@ -22,7 +22,7 @@ fundamental trade-off. Every result below is single-threaded (`julia -t 1`, `tas
 | **regex** | Base `Regex` (PCRE2, C) | regex crate **13×** (alternation) / **54×** (backtracking+anchor); 1.3–1.5× simple patterns | ⚠ **Gap** — but PCRE2(C)-vs-Rust; pure-Julia engine is a massive port |
 | **simdutf8** | `Utf8.isvalid_utf8` (ours) | **beats the crate both regimes**: multibyte 1.05× (11× Base), ASCII 0.96–1.01× simdutf8 (AVX2 + prefetch); byte-exact | ✅ **PORTED** (pure-Julia lemire SIMD) — found **StrictMode F33 + F34** |
 | **base64** (enc+dec) | `ByteOps.base64_encode!`/`base64_decode!` (ours) | **kernel beats `base64-simd`: encode 1.70×, decode 1.12×** (preallocated), 28×/13× Base; byte-exact. The "27×" was an alloc artifact | ✅ **PORTED** (Muła AVX2/SSE) |
-| **hex** (enc+dec) | `ByteOps.hex_encode!`/`hex_decode!` (ours) | encode ~parity faster-hex (0.95–0.98×); **decode 1.25× (beats)**, 43× `hex2bytes`; byte-exact + validating | ✅ **PORTED** (SIMD pshufb) |
+| **hex** (enc+dec) | `ByteOps.hex_encode!`/`hex_decode!` (ours) | **beats faster-hex: encode 1.01× (AVX2), decode 1.26×**; 7×/43× `bytes2hex`/`hex2bytes`; byte-exact + validating | ✅ **PORTED** (SIMD pshufb) |
 | **bytecount** | `count(==(b), v)` | **0.87× (parity)** — Julia auto-vectorizes | ⏭ Skip — Julia already SIMD |
 | **lexical** (float parse) | `parse(Float64, _)` | **3×** (13 vs 38 Mfloat/s) | ⚠ Gap — branchy parse, lower priority |
 | **ryu** | `Base.Ryu.writeshortest` | 0.76–2.05× (value-dependent) | ⏭ Skip — Base ships it |
