@@ -11,7 +11,21 @@ report **rel-σ**. Parity = `rust_median / julia_median`; **≥ 0.96 ⇒ Julia g
 Hardware varies run-to-run (~±7% drift); only σ-clean (<15% both sides) comparisons are treated as
 conclusive. Regenerate any plot from saved points with `include("bench/harness.jl"); using .Harness; replot()`.
 
-Date: 2026-06-22.
+Date: 2026-06-22 (probe findings below); ports through 2026-06-28.
+
+## Shipped ports (pure-Julia, gap closed)
+
+Where a fair re-probe found a *real* gap, a port shipped. Full scoreboard + plots in
+[`docs/src/index.md`](docs/src/index.md) / [`ports.md`](docs/src/ports.md); per-crate detail in the tracker.
+
+| Port | vs the Rust crate | Notes |
+|---|---|---|
+| `Factorizations` (faer Cholesky+QR) | beats at all n 256–2048 | gemm-orchestration win, no asm |
+| `Blake3` | pure 1.60× over pure-Rust; `blake3_asm` switch buys back the asm's 13% | full-hash 1.16× |
+| `StringSearch` (memchr) / `IntFormat` (itoa) | parity-to-beat / beats | — |
+| `SwissDict` (hashbrown) | miss-heavy wins, hit-heavy loses | workload tradeoff |
+| `Utf8` (simdutf8) | **beats both regimes** (multibyte 1.05×, ASCII parity); 11× Base | found StrictMode **F33/F34** |
+| `ByteOps` (base64-simd, faster-hex) | **all 4 kernels beat the crate** | base64 enc 1.69×/dec 1.12×, hex enc 1.01×/dec 1.26×; the "27× base64 gap" was a measurement artifact |
 
 ## Verdict summary
 

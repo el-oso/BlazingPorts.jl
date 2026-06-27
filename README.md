@@ -23,11 +23,21 @@ memchr-byte). Julia ports shipped only where a *fair re-probe* found a real gap:
 - **`StringSearch` (memchr substring)** — parity-to-beat vs memmem; **`IntFormat` (itoa)** — beats the crate. Done.
 - **`SwissDict` (hashbrown)** — `<:AbstractDict`; wins **miss-heavy** workloads, loses hit-heavy (a workload
   tradeoff, not a clean win). Done.
+- **`Utf8` (simdutf8)** — pure-Julia SIMD UTF-8 validator (lemire, `Vec{32}` AVX2 `pshufb`). Base's `isvalid`
+  falls to scalar on multibyte; ours is **11× over Base and beats `simdutf8` on both regimes** (multibyte
+  1.05×, ASCII parity), byte-exact. Pushing it to parity surfaced two StrictMode findings — **F33**
+  (`kernel_report` blind to shuffle/`pshufb` ops) and **F34** (latency- vs bandwidth-bound). Done.
+- **`ByteOps` (base64-simd + faster-hex)** — the shuffle-SIMD transcoding library. **All four kernels beat
+  their Rust crate** (kernel-only, preallocated): base64 encode **1.69×** / decode **1.12×**, hex encode
+  **1.01×** / decode **1.26×**; 13–43× over Julia stdlib; byte-exact, both decoders validating. The probed
+  "27× base64 gap" was a measurement artifact (output alloc + `String` + GC timed in the loop) — isolate the
+  kernel and pure Julia wins. Done.
 
 **Canonical state:** [`RESULTS.md`](RESULTS.md) (in-repo verdicts + the faer detail) and the cross-project tracker
 [`../blazingly-fast-rust-crates.md`](../blazingly-fast-rust-crates.md) (every crate + gap log + next probes).
-**Open threads:** `Base.Ryu` serial-divchain PR (drafted, unfiled); SwissDict **group-aligned probing** (to win
-hits too — hashbrown's design; aligns insert+lookup together).
+**Open threads:** `Base.Ryu` serial-divchain PR (drafted, unfiled); **SIMD UTF-8 validation → Julia Base**
+(issue + PR drafted in `contrib/upstream/`, unfiled); **StrictMode F33/F34** (cold-agent specs in
+`StrictMode.jl/FEEDBACK.md`); SwissDict **group-aligned probing** (to win hits too).
 
 ## Probe-first
 
