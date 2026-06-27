@@ -19,9 +19,9 @@ shuffle-port-bound kernel).
 """
 module ByteOps
 
-using SIMD: Vec, vload, vstore, shufflevector
+using SIMD: Vec, vload, vstore, shufflevector, vifelse
 
-export base64_encode, base64_encode!, hex_encode, hex_encode!, hex_decode, hex_decode!
+export base64_encode, base64_encode!, hex_encode, hex_encode!, hex_decode, hex_decode!, base64_decode, base64_decode!
 
 # ── AVX2 SIMD primitives via llvmcall ────────────────────────────────────────────────────────────────
 const _V32 = NTuple{32, VecElement{UInt8}}
@@ -30,6 +30,13 @@ _bin(intr, t) = ("declare $t @$intr($t, $t)\ndefine $t @e($t %a, $t %b) #0 {\n%r
 const _PSHUFB16 = _bin("llvm.x86.ssse3.pshuf.b.128", "<16 x i8>")
 const _V16 = NTuple{16, VecElement{UInt8}}
 @inline _pshufb16(t::Vec{16,UInt8}, i::Vec{16,UInt8}) = Vec(Base.llvmcall(_PSHUFB16, _V16, Tuple{_V16,_V16}, t.data, i.data))
+const _V8w = NTuple{8, VecElement{UInt16}}; const _V4d = NTuple{4, VecElement{UInt32}}
+const _MUBS = ("declare <8 x i16> @llvm.x86.ssse3.pmadd.ub.sw.128(<16 x i8>,<16 x i8>)\ndefine <8 x i16> @e(<16 x i8> %a,<16 x i8> %b) #0 {\n%r=call <8 x i16> @llvm.x86.ssse3.pmadd.ub.sw.128(<16 x i8> %a,<16 x i8> %b)\nret <8 x i16> %r\n}\nattributes #0={alwaysinline}", "e")
+const _MWD  = ("declare <4 x i32> @llvm.x86.sse2.pmadd.wd(<8 x i16>,<8 x i16>)\ndefine <4 x i32> @e(<8 x i16> %a,<8 x i16> %b) #0 {\n%r=call <4 x i32> @llvm.x86.sse2.pmadd.wd(<8 x i16> %a,<8 x i16> %b)\nret <4 x i32> %r\n}\nattributes #0={alwaysinline}", "e")
+const _EQ16 = ("define <16 x i8> @e(<16 x i8> %a,<16 x i8> %b) #0 {\n%c=icmp eq <16 x i8> %a,%b\n%r=sext <16 x i1> %c to <16 x i8>\nret <16 x i8> %r\n}\nattributes #0={alwaysinline}", "e")
+@inline _maddubs(a::Vec{16,UInt8}, b::Vec{16,UInt8}) = Vec(Base.llvmcall(_MUBS, _V8w, Tuple{_V16,_V16}, a.data, b.data))
+@inline _maddwd(a::Vec{8,UInt16}, b::Vec{8,UInt16}) = Vec(Base.llvmcall(_MWD, _V4d, Tuple{_V8w,_V8w}, a.data, b.data))
+@inline _cmpeqb(a::Vec{16,UInt8}, b::Vec{16,UInt8}) = Vec(Base.llvmcall(_EQ16, _V16, Tuple{_V16,_V16}, a.data, b.data))
 const _PSHUFB = _bin("llvm.x86.avx2.pshuf.b", "<32 x i8>")
 const _USUB   = _bin("llvm.usub.sat.v32i8", "<32 x i8>")
 const _MULHU  = _bin("llvm.x86.avx2.pmulhu.w", "<16 x i16>")
@@ -207,6 +214,79 @@ function hex_decode(s::DenseVector{UInt8})
 end
 hex_decode(s::AbstractString) = hex_decode(codeunits(String(s)))
 hex_decode(s::AbstractVector{UInt8}) = hex_decode(collect(s))
+
+# ── base64 decode (Muła SSE: char→6bit lookup+validate, then pmaddubs/pmaddwd pack 4×6bit→3 bytes) ────
+const _SHIFT = Vec{16,UInt8}((0,0,0x13,0x04,0xBF,0xBF,0xB9,0xB9,0,0,0,0,0,0,0,0))
+const _MASKL = Vec{16,UInt8}((0xA8,0xF8,0xF8,0xF8,0xF8,0xF8,0xF8,0xF8,0xF8,0xF8,0xF0,0x54,0x50,0x50,0x50,0x54))
+const _BITP  = Vec{16,UInt8}((0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0,0,0,0,0,0,0,0))
+const _C2F = Vec{16,UInt8}(0x2f); const _C16 = Vec{16,UInt8}(16); const _ZERO16 = Vec{16,UInt8}(0)
+const _MUBSK = Vec{16,UInt8}(ntuple(i -> UInt8((0x01400140 >> (8 * ((i - 1) % 4))) & 0xff), 16))
+const _MWDK  = reinterpret(Vec{8,UInt16}, Vec{16,UInt8}(ntuple(i -> UInt8((0x00011000 >> (8 * ((i - 1) % 4))) & 0xff), 16)))
+const _PACK  = Vec{16,UInt8}((2,1,0,6,5,4,10,9,8,14,13,12,0x80,0x80,0x80,0x80))
+
+@inline function _decb64_16(input::Vec{16,UInt8})       # 16 base64 chars → (12 bytes low lanes, all-valid?)
+    hin = (input >> 0x04) & _LOW16; lin = input & _LOW16
+    shift = vifelse(_cmpeqb(input, _C2F) != _ZERO16, _C16, _pshufb16(_SHIFT, hin))   # '/' → +16
+    nonmatch = _cmpeqb(_pshufb16(_MASKL, lin) & _pshufb16(_BITP, hin), _ZERO16)       # 0xFF where invalid
+    merged = _maddwd(_maddubs(input + shift, _MUBSK), _MWDK)                          # 4×6bit → 3 bytes/dword
+    (_pshufb16(reinterpret(Vec{16,UInt8}, merged), _PACK), all(nonmatch == _ZERO16))
+end
+
+const _B64DEC = let t = fill(0xff, 256)                  # scalar char→6bit table (0xff = invalid)
+    for (v, c) in enumerate(_CHARSET); t[c+1] = UInt8(v - 1); end
+    Tuple(t)
+end
+@inline _b64val(c) = @inbounds _B64DEC[c+1]
+
+_b64declen(s) = (n = length(s); n == 0 ? 0 : 3 * (n ÷ 4) - (@inbounds (s[n] == UInt8('=')) + (s[n-1] == UInt8('='))))
+
+"""
+    base64_decode!(out::Vector{UInt8}, s::DenseVector{UInt8}) -> Bool
+
+Decode `=`-padded base64 `s` (length a multiple of 4) into preallocated `out` (`base64_decode`-sized);
+returns `true` iff all characters were valid. The allocation-free kernel.
+"""
+function base64_decode!(out::Vector{UInt8}, s::DenseVector{UInt8})
+    n = length(s); n == 0 && return true
+    outlen = length(out); ok = true
+    @inbounds npad = (s[n] == UInt8('=')) + (s[n-1] == UInt8('='))
+    nfull = npad > 0 ? n - 4 : n                          # exclude the final (possibly padded) group
+    GC.@preserve s out begin
+        p = pointer(s); q = pointer(out); i = 0; o = 0
+        @inbounds while i + 16 <= nfull && o + 16 <= outlen
+            bytes, v = _decb64_16(vload(Vec{16,UInt8}, p + i)); ok &= v
+            vstore(bytes, q + o); i += 16; o += 12
+        end
+        @inbounds while i + 4 <= n                         # scalar 4 chars → 3 bytes (last group padded)
+            c0 = s[i+1]; c1 = s[i+2]; c2 = s[i+3]; c3 = s[i+4]
+            v0 = _b64val(c0); v1 = _b64val(c1)
+            pad2 = c2 == UInt8('='); pad3 = c3 == UInt8('=')
+            v2 = pad2 ? 0x00 : _b64val(c2); v3 = pad3 ? 0x00 : _b64val(c3)
+            (v0 > 63 || v1 > 63 || (!pad2 && v2 > 63) || (!pad3 && v3 > 63)) && (ok = false)
+            out[o+1] = (v0 << 2) | (v1 >> 4); o += 1
+            if !pad2; out[o+1] = ((v1 & 0x0f) << 4) | (v2 >> 2); o += 1; end
+            if !pad3; out[o+1] = ((v2 & 0x03) << 6) | v3; o += 1; end
+            i += 4
+        end
+    end
+    ok
+end
+
+"""
+    base64_decode(s) -> Vector{UInt8}
+
+Decode standard (`=`-padded) base64. Byte-exact with `Base64.base64decode`; throws `ArgumentError` on a
+length that is not a multiple of 4 or an invalid character. Allocating wrapper over [`base64_decode!`](@ref).
+"""
+function base64_decode(s::DenseVector{UInt8})
+    n = length(s); n == 0 && return UInt8[]
+    (n % 4 == 0) || throw(ArgumentError("base64_decode: length not a multiple of 4"))
+    out = Vector{UInt8}(undef, _b64declen(s))
+    base64_decode!(out, s) || throw(ArgumentError("base64_decode: invalid base64 character"))
+    out
+end
+base64_decode(s::AbstractString) = base64_decode(codeunits(String(s)))
+base64_decode(s::AbstractVector{UInt8}) = base64_decode(collect(s))
 
 """
     base64_encode(data) -> String

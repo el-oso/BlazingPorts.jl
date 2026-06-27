@@ -12,13 +12,15 @@ Harness.single_thread!()
 isfile(Harness.RUST_LIB) || error("build the Rust lib first: bash bench/rust_compare/build.sh")
 const LIB = Harness.RUST_LIB
 
-import BlazingPorts.ByteOps: base64_encode!, hex_encode!, hex_decode!
+import BlazingPorts.ByteOps: base64_encode!, hex_encode!, hex_decode!, base64_decode!
 const N = 12 * 1024 * 1024
 const data = rand(Xoshiro(0xB17E0), UInt8, N)
 const b64out = Vector{UInt8}(undef, cld(N, 3) * 4)
 const hexout = Vector{UInt8}(undef, 2N)
 const hexin = Vector{UInt8}(codeunits(bytes2hex(data)))    # 2N hex chars → N bytes
 const decout = Vector{UInt8}(undef, N)
+const b64in = Vector{UInt8}(codeunits(base64encode(data))) # base64 of data → N bytes
+const b64dout = Vector{UInt8}(undef, N)
 
 @noinline j_b64(d) = base64encode(d)                       # Julia stdlib baseline (allocating)
 @noinline o_b64(d) = base64_encode!(b64out, d)             # ours, preallocated kernel
@@ -32,16 +34,22 @@ const decout = Vector{UInt8}(undef, N)
 @noinline o_hexd(_) = hex_decode!(decout, hexin)
 @noinline r_hexd(_) = GC.@preserve hexin decout ccall((:bp_hex_decode, LIB), Bool,
     (Ptr{UInt8}, Csize_t, Ptr{UInt8}), hexin, length(hexin), decout)
+@noinline j_b64d(_) = base64decode(b64in)
+@noinline o_b64d(_) = base64_decode!(b64dout, b64in)
+@noinline r_b64d(_) = GC.@preserve b64in b64dout ccall((:bp_base64_decode, LIB), Cssize_t,
+    (Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t), b64in, length(b64in), b64dout, length(b64dout))
 
 # correctness gates
 o_b64(data); String(copy(b64out)) == base64encode(data) || error("base64 encode mismatch")
 o_hex(data); String(copy(hexout)) == bytes2hex(data) || error("hex encode mismatch")
 o_hexd(data); decout == data || error("hex decode mismatch")
+o_b64d(data); b64dout == data || error("base64 decode mismatch")
 
 probes = Probe[]
 g(p) = N / p.median / 1e9
 for (op, jl, ours, rust, crate) in (
     ("base64 encode", j_b64,  o_b64,  r_b64,  "base64-simd"),
+    ("base64 decode", j_b64d, o_b64d, r_b64d, "base64-simd"),
     ("hex encode",    j_hex,  o_hex,  r_hex,  "faster-hex"),
     ("hex decode",    j_hexd, o_hexd, r_hexd, "faster-hex"))
     println("\n=== $op, $(N ÷ 1024^2) MiB, single-thread, KERNEL-ONLY (preallocated) ===")

@@ -6,8 +6,8 @@ const NB = 12 * 1024 * 1024
 d = JSON.parsefile(joinpath(HERE, "results", "byteops_ports.json"))
 cmap = Dict(c["label"] => c for c in d["contenders"])
 gbs(label) = NB / cmap[label]["median"] / 1e9
-ops = ["base64 encode", "hex encode", "hex decode"]
-crate_of(op) = op == "base64 encode" ? "base64-simd" : "faster-hex"
+ops = ["base64 encode", "base64 decode", "hex encode", "hex decode"]
+crate_of(op) = startswith(op, "base64") ? "base64-simd" : "faster-hex"
 jl   = [gbs("Julia stdlib (scalar, alloc): $op") for op in ops]
 ours = [gbs("BlazingPorts.ByteOps (SIMD): $op") for op in ops]
 rust = [gbs("$(crate_of(op)) (SIMD kernel): $op") for op in ops]
@@ -23,7 +23,7 @@ for (i, r) in enumerate(ours ./ rust)
     annotate!(p, i, maximum((jl[i], ours[i], rust[i])) * 1.5,
         text(@sprintf("ours = %.2f× crate", r), 9, :center))
 end
-plot!(p; xlims = (0.4, 3.6))
+plot!(p; xlims = (0.4, 4.6))
 for dir in (joinpath(HERE, "..", "docs", "assets"), joinpath(HERE, "..", "docs", "src", "assets"))
     mkpath(dir); savefig(p, joinpath(dir, "byteops_ports.png"))
 end

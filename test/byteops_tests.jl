@@ -51,6 +51,26 @@ end
     @test_throws ArgumentError hex_decode("abc")                 # odd length
 end
 
+@testitem "base64_decode_correctness" tags = [:byteops] begin
+    using BlazingPorts.ByteOps: base64_decode, base64_decode!
+    using Base64, Random
+    for L in 0:300
+        b = rand(UInt8, L); @test base64_decode(base64encode(b)) == b
+    end
+    Random.seed!(0xB64D)
+    for _ in 1:20000
+        b = rand(UInt8, rand(0:400)); @test base64_decode(base64encode(b)) == b
+    end
+    @test_throws ArgumentError base64_decode("abc")                       # length not %4
+    @test_throws ArgumentError base64_decode("####")                      # invalid chars
+    @test_throws ArgumentError base64_decode("AAAAAAAAAAAAAAA#AAAA")      # invalid (SIMD path)
+    # preallocated kernel agrees + 0-alloc
+    big = rand(UInt8, 48 * 1024); s = Vector{UInt8}(codeunits(base64encode(big)))
+    out = Vector{UInt8}(undef, length(big)); base64_decode!(out, s)
+    @test out == big
+    @test (@allocated base64_decode!(out, s)) == 0
+end
+
 @testitem "base64_strictmode" tags = [:byteops] begin
     # The base64 block kernel is a SHUFFLE/LOOKUP kernel (vpshufb reshuffle + vpshufb LUT translate +
     # vpmulhuw bit-spread). Audit it AND re-probe F33 (kernel_report blindness to shuffle ops) at <32 x i8>.
