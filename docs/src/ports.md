@@ -132,6 +132,27 @@ Reproduce the whole comparison: `bench/probe_blake3_kernels.jl` (3-way kernel pr
 full-pipeline probe) and `bench/probe_blake3.jl` (full pipeline); `bench/plot_blake3_kernels.jl` regenerates
 both plots from the saved JSON.
 
+## simd-json → ⚠ moderate gap; stage-1 SIMD POC in a JSON.jl fork
+
+Probed against **JSON.jl ≥ 1.6** (the rewrite — not the old 0.21.x). On the σ-clean structural comparison,
+`JSON.isvalidjson` (a 0-alloc full scan) does **0.64 GB/s** while simd-json's `to_tape` does **0.98** —
+so simd-json *builds a tape faster than Julia can merely validate*. Eager materialization is wider:
+`JSON.parse → Dict` 0.19 vs simd-json's borrowed-value DOM 0.31 (these allocate, so they're GC-noisy;
+`isvalidjson` is the clean number). A genuine but **moderate ~1.5× gap** — JSON.jl v1.6 already closed
+most of what the old parser lost.
+
+![simd-json vs Julia JSON parsers](assets/simdjson.png)
+
+Rather than port a whole two-stage SIMD parser, we tested simdjson's **stage 1** where it fits JSON.jl's
+lazy architecture: a `Vec{64,UInt8}` classifier (`<64 x i8>` AVX-512 `vpcmpb` + bitmask) replacing the
+byte-by-byte scan for the end of a string. POC on a fork (`el-oso/JSON.jl`, branch
+`strictmode-simd-stage1`): **the kernel is ~28× the scalar byte loop**, and end-to-end it's
+**~4× faster than simd-json on long-string JSON** but ~10–16% slower on short-field JSON (string scanning
+isn't the bottleneck there) — full size-sweep in the fork's `perf/string_scan_bench.md`. Byte-exact
+(JSONTestSuite 283/283). The exercise also surfaced and **fixed a StrictMode bug (F32)**:
+`@assert_no_scalar_loops` was blind to a scalar loop coexisting with vectorized code. Reproduce:
+`bench/probe_simdjson.jl` → `bench/results/simdjson.json` → `bench/plot_simdjson.jl`.
+
 ## hashbrown → `SwissDict` — ⚖️ a fundamental trade-off
 
 Reading Base's `dict.jl` reframed this: **Base `Dict` is already a SwissTable** (control bytes = h2,
