@@ -37,6 +37,7 @@ hashbrown = "0.15"        # SwissTable hash map (Tier 2 GP)
 roaring = "0.10"          # compressed bitsets (Tier 2 GP)
 bumpalo = "3"             # bump / arena allocator (Tier 2 GP)
 blake3 = { version = "1", default-features = false }  # SIMD tree hashing (Tier 3 GP) — no rayon
+simd-json = "0.17.0"
 
 [profile.release]
 opt-level = 3

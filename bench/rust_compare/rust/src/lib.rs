@@ -599,3 +599,40 @@ pub extern "C" fn bp_hb_get_miss(h: *const HbMap, keys: *const u64, n: usize) ->
     let ks = unsafe { std::slice::from_raw_parts(keys, n) };
     ks.iter().filter(|&&x| m.get(&x).is_some()).count() as u64
 }
+
+// ── simd-json (Tier 3 GP): SIMD JSON parsing (stage-1 structural scan + stage-2 build). Single-thread. ──
+// simd-json unescapes strings IN PLACE in the input buffer, so each parse needs a fresh mutable copy of
+// the immutable source. We copy data→reusable `scratch` (cap ≥ len+64), then parse; `bp_simdjson_memcpy`
+// times the copy alone so the probe can report parse-only = total − copy. A full DOM walk returns a
+// checksum so LLVM can't elide the parse. which: 0 = borrowed-value DOM (eager), 1 = tape (lazy).
+use simd_json::prelude::*;
+
+fn sj_walk(v: &simd_json::BorrowedValue) -> u64 {
+    if let Some(a) = v.as_array() {
+        a.iter().fold(1u64, |c, x| c.wrapping_add(sj_walk(x)))
+    } else if let Some(o) = v.as_object() {
+        o.iter().fold(1u64, |c, (k, x)| c.wrapping_add(k.len() as u64).wrapping_add(sj_walk(x)))
+    } else if let Some(s) = v.as_str() {
+        s.len() as u64
+    } else if let Some(n) = v.as_i64() {
+        n as u64
+    } else if let Some(f) = v.as_f64() {
+        f.to_bits()
+    } else { 1 }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_simdjson_parse(data: *const u8, len: usize, scratch: *mut u8, cap: usize, which: u32) -> u64 {
+    assert!(cap >= len);
+    unsafe { std::ptr::copy_nonoverlapping(data, scratch, len); }
+    let buf = unsafe { std::slice::from_raw_parts_mut(scratch, len) };
+    match which {
+        1 => match simd_json::to_tape(buf) { Ok(t) => t.0.len() as u64, Err(_) => u64::MAX },
+        _ => match simd_json::to_borrowed_value(buf) { Ok(v) => sj_walk(&v), Err(_) => u64::MAX },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_simdjson_memcpy(data: *const u8, len: usize, scratch: *mut u8) -> u8 {
+    unsafe { std::ptr::copy_nonoverlapping(data, scratch, len); *scratch }
+}
