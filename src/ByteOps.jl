@@ -21,7 +21,7 @@ module ByteOps
 
 using SIMD: Vec, vload, vstore, shufflevector
 
-export base64_encode, base64_encode!, hex_encode, hex_encode!
+export base64_encode, base64_encode!, hex_encode, hex_encode!, hex_decode, hex_decode!
 
 # ── AVX2 SIMD primitives via llvmcall ────────────────────────────────────────────────────────────────
 const _V32 = NTuple{32, VecElement{UInt8}}
@@ -155,6 +155,58 @@ function hex_encode(data::DenseVector{UInt8})
     out = Vector{UInt8}(undef, 2 * length(data)); hex_encode!(out, data); String(out)
 end
 hex_encode(data::AbstractVector{UInt8}) = hex_encode(collect(data))
+
+# ── hex decode (N=16: validate + nibble parse + pshufb de-interleave) ────────────────────────────────
+const _EVEN = Vec{16,UInt8}((0,2,4,6,8,10,12,14, 0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80))
+const _ODD  = Vec{16,UInt8}((1,3,5,7,9,11,13,15, 0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80))
+const _NINE = Vec{16,UInt8}(9)
+
+@inline function _dec16(c::Vec{16,UInt8})               # 16 hex chars → (8 bytes in low lanes, all-valid?)
+    isd = (c >= Vec{16,UInt8}(0x30)) & (c <= Vec{16,UInt8}(0x39))
+    lc  = c | Vec{16,UInt8}(0x20)
+    isl = (lc >= Vec{16,UInt8}(0x61)) & (lc <= Vec{16,UInt8}(0x66))
+    nib = (c & _LOW16) + (c >> 0x06) * _NINE             # 0-9 for digits, +9 for letters
+    (((_pshufb16(nib, _EVEN) << 0x04) | _pshufb16(nib, _ODD)), all(isd | isl))
+end
+@inline _hexnib(ch) = (0x30 <= ch <= 0x39) ? ch - 0x30 :
+                      (0x61 <= (ch | 0x20) <= 0x66) ? (ch | 0x20) - 0x61 + 0x0a : 0xff
+
+"""
+    hex_decode!(out::Vector{UInt8}, s::DenseVector{UInt8}) -> Bool
+
+Decode hex `s` (even length) into preallocated `out` (`length(s)÷2` bytes); returns `true` iff all
+characters were valid hex (validated SIMD-wide). The allocation-free kernel.
+"""
+function hex_decode!(out::Vector{UInt8}, s::DenseVector{UInt8})
+    n = length(s); ok = true
+    GC.@preserve s out begin
+        p = pointer(s); q = pointer(out); i = 0; o = 0
+        @inbounds while i + 16 <= n
+            bytes, v = _dec16(vload(Vec{16,UInt8}, p + i)); ok &= v
+            vstore(shufflevector(bytes, Val((0, 1, 2, 3, 4, 5, 6, 7))), q + o); i += 16; o += 8
+        end
+        @inbounds while i < n
+            hv = _hexnib(s[i+1]); lv = _hexnib(s[i+2]); (hv > 0x0f || lv > 0x0f) && (ok = false)
+            out[o+1] = (hv << 4) | lv; i += 2; o += 1
+        end
+    end
+    ok
+end
+
+"""
+    hex_decode(s) -> Vector{UInt8}
+
+Decode lowercase-or-uppercase hex. Byte-exact with `hex2bytes`; throws `ArgumentError` on odd length or any
+invalid character (validated SIMD-wide). Allocating wrapper over [`hex_decode!`](@ref).
+"""
+function hex_decode(s::DenseVector{UInt8})
+    n = length(s); isodd(n) && throw(ArgumentError("hex_decode: odd length"))
+    out = Vector{UInt8}(undef, n ÷ 2)
+    hex_decode!(out, s) || throw(ArgumentError("hex_decode: invalid hex character"))
+    out
+end
+hex_decode(s::AbstractString) = hex_decode(codeunits(String(s)))
+hex_decode(s::AbstractVector{UInt8}) = hex_decode(collect(s))
 
 """
     base64_encode(data) -> String

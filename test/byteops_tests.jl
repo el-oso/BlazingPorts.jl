@@ -38,6 +38,19 @@ end
     hex_encode!(out, big); @test (@allocated hex_encode!(out, big)) == 0
 end
 
+@testitem "hex_decode_correctness" tags = [:byteops] begin
+    using BlazingPorts.ByteOps: hex_decode
+    using Random
+    Random.seed!(0xDEC0)
+    for _ in 1:20000
+        b = rand(UInt8, rand(0:400)); @test hex_decode(bytes2hex(b)) == b
+    end
+    @test hex_decode("DEADBEEF") == hex2bytes("DEADBEEF")        # uppercase
+    @test_throws ArgumentError hex_decode("xy")                  # invalid char (scalar path)
+    @test_throws ArgumentError hex_decode("deadbeefdeadbeeZ")    # invalid char (SIMD path)
+    @test_throws ArgumentError hex_decode("abc")                 # odd length
+end
+
 @testitem "base64_strictmode" tags = [:byteops] begin
     # The base64 block kernel is a SHUFFLE/LOOKUP kernel (vpshufb reshuffle + vpshufb LUT translate +
     # vpmulhuw bit-spread). Audit it AND re-probe F33 (kernel_report blindness to shuffle ops) at <32 x i8>.

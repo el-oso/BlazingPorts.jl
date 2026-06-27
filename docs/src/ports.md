@@ -211,9 +211,11 @@ in the timed region). The picture inverts:
 
 ![Ported byte-ops kernels vs Rust crates, kernel-only](assets/byteops_ports.png)
 
-- **base64 encode: ours 19.9 vs `base64-simd` 11.7 GB/s = 1.70× — the pure-Julia kernel beats the crate**
+- **base64 encode: ours ~20 vs `base64-simd` ~11.7 GB/s = 1.7× — the pure-Julia kernel beats the crate**
   (27× over `Base64.base64encode`). Muła AVX2 (offset-load + asymmetric `vpshufb`, no cross-lane `vpermd`).
-- **hex encode: ours 14.0 vs `faster-hex` 14.3 GB/s = 0.98× (parity)**, 7× over `bytes2hex`.
+- **hex encode: ours ~14.3 vs `faster-hex` ~15 GB/s = ~parity** (0.95–0.98×, both bandwidth-bound), 7× `bytes2hex`.
+- **hex decode: ours 6.3 vs `faster-hex` 5.0 GB/s = 1.25× — beats the crate**, 43× over `hex2bytes`;
+  validates (rejects bad chars / odd length) SIMD-wide. (`base64_decode` is the remaining kernel.)
 
 The "27× base64 gap" from the probe above was **not a kernel gap** — it timed a 21 MiB `Vector` allocation +
 `String()` + forced GC *inside* the loop. Three attempts to "fix the kernel" (removing the `vpermd`, a 2×
