@@ -17,6 +17,9 @@ module Blake3
 
 using SIMD: Vec, shufflevector
 using Base.Cartesian: @nexprs
+using Preferences: @load_preference
+import Libdl
+import VectorizationBase
 
 export blake3
 
@@ -39,6 +42,17 @@ const N = 16   # SIMD lanes: Vec{16,UInt32} → AVX-512 (zmm) on this Zen5; the 
 # Unkeyed hashing uses IV as the key
 const KEY1 = IV1; const KEY2 = IV2; const KEY3 = IV3; const KEY4 = IV4
 const KEY5 = IV5; const KEY6 = IV6; const KEY7 = IV7; const KEY8 = IV8
+
+# ── Optional hand-asm leaf kernel (opt-in, behind Preferences) ───────────────────────────────────────
+# blake3 ships a hand-written AVX-512 `blake3_hash_many_avx512` that beats our portable SIMD.jl leaf
+# compress by ~13% — a register-allocation edge on the chained 16-block loop that no compiler (LLVM or
+# rustc) reproduces. We vendor that CC0 `.S` (deps/blake3/) and, when `blake3_asm` is enabled AND the
+# host has AVX-512F AND `cc` is present, assemble + dlopen it at __init__ and route the leaf through it.
+# Default is on-where-available; set the preference to false to force the portable pure-Julia path.
+# `_ASM_PREF` is a compile-time const; `_ASM_FN[]` is set in __init__ (0 = unavailable → pure fallback).
+const _ASM_PREF = @load_preference("blake3_asm", true)
+const _ASM_FN = Ref(Ptr{Cvoid}(0))
+@inline _asm_active() = _ASM_PREF && _ASM_FN[] != Ptr{Cvoid}(0)
 
 # ── G mixing function (scalar) ────────────────────────────────────────────────────────────────────
 @inline function _g(a::UInt32, b::UInt32, c::UInt32, d::UInt32, mx::UInt32, my::UInt32)
@@ -362,6 +376,33 @@ end
 @inline _cnf_val(::NTuple{N,Ptr{UInt8}}) where N = Val(N)
 @inline _cnf_val(::_BasePtr16) = Val(16)
 
+# ── Optional asm leaf: blake3's hand-written AVX-512 hash_many over 16 full chunks ──────────────────
+# Reused single-threaded scratch (matches the campaign's single-thread charter) — alloc-free per batch.
+# ponytail: module-level scratch ⇒ the asm leaf is single-threaded; give each call its own buffers if
+# blake3() ever needs to run concurrently. The pure-Julia path below is already thread-safe.
+const _ASM_INPUTS = Vector{Ptr{UInt8}}(undef, 16)   # 16 chunk start pointers
+const _ASM_OUTBUF = Vector{UInt8}(undef, 16 * 32)   # 16 chunk CVs × 32 B, chunk-major
+const _ASM_KEY    = UInt32[KEY1, KEY2, KEY3, KEY4, KEY5, KEY6, KEY7, KEY8]  # unkeyed = IV
+
+# Produces the SAME 8 word-major Vec{16,UInt32} lane vectors as _compress_N_chunks_body (lane c = chunk
+# c). `base` is the start of 16 contiguous 1024-byte chunks; unkeyed (IV), counter = chunk_counter.
+@inline function _compress_N_chunks_asm(base::Ptr{UInt8}, chunk_counter::UInt64)
+    @inbounds for k in 1:16
+        _ASM_INPUTS[k] = base + (k - 1) * CHUNK_LEN
+    end
+    # void blake3_hash_many_avx512(inputs, num_inputs, blocks, key, counter, increment_counter,
+    #                              flags, flags_start, flags_end, out)
+    ccall(_ASM_FN[], Cvoid,
+        (Ptr{Ptr{UInt8}}, Csize_t, Csize_t, Ptr{UInt32}, UInt64, Bool, UInt8, UInt8, UInt8, Ptr{UInt8}),
+        _ASM_INPUTS, Csize_t(16), Csize_t(CHUNK_LEN ÷ BLOCK_LEN),
+        _ASM_KEY, chunk_counter, true,
+        UInt8(0), UInt8(FLAG_CHUNK_START), UInt8(FLAG_CHUNK_END), _ASM_OUTBUF)
+    # chunk-major out (chunk c's 8 LE words at outp + c*8) → 8 lane vectors (lane c = word w of chunk c).
+    outp = Ptr{UInt32}(pointer(_ASM_OUTBUF))
+    @inline ldw(w::Int) = Vec{16,UInt32}(ntuple(c -> unsafe_load(outp, (c - 1) * 8 + w), Val(16)))
+    return ldw(1), ldw(2), ldw(3), ldw(4), ldw(5), ldw(6), ldw(7), ldw(8)
+end
+
 # Entry point: dispatch to body via Val{N} so N is a compile-time constant.
 # Accepts NTuple{N,Ptr{UInt8}} (all N, including N=8 test) or _BasePtr16 (N=16 hot path).
 function _compress_N_chunks_full(
@@ -369,6 +410,10 @@ function _compress_N_chunks_full(
         key1::UInt32, key2::UInt32, key3::UInt32, key4::UInt32,
         key5::UInt32, key6::UInt32, key7::UInt32, key8::UInt32,
         chunk_counter::UInt64)
+    # Opt-in asm leaf: only the N=16 unkeyed (IV) hot path; folds away entirely when the pref is off.
+    if _asm_active() && ptrs isa _BasePtr16
+        return _compress_N_chunks_asm(ptrs.base, chunk_counter)
+    end
     _compress_N_chunks_body(ptrs, _cnf_val(ptrs), key1,key2,key3,key4,key5,key6,key7,key8, chunk_counter)
 end
 
@@ -896,6 +941,33 @@ function _blake3_raw(p::Ptr{UInt8}, n::Int, out::Ptr{UInt8})
     unsafe_store!(q, root_out[5], 5); unsafe_store!(q, root_out[6], 6)
     unsafe_store!(q, root_out[7], 7); unsafe_store!(q, root_out[8], 8)
     return nothing
+end
+
+# ── Asm kernel setup: assemble the vendored CC0 .S with the system cc and dlopen it ─────────────────
+# Runs once at load. Any miss (pref off, non-x86-64-Linux, no AVX-512F, no cc, build/load failure)
+# leaves _ASM_FN[] == 0 → _asm_active() is false → the pure-Julia path is used. Never throws.
+function __init__()
+    _ASM_PREF || return
+    (Sys.islinux() && Sys.ARCH === :x86_64) || return
+    try
+        Bool(VectorizationBase.has_feature(Val(:x86_64_avx512f))) || return
+    catch
+        return
+    end
+    cc = Sys.which("cc")
+    isnothing(cc) && return
+    srcS = normpath(joinpath(@__DIR__, "..", "deps", "blake3", "blake3_avx512_x86-64_unix.S"))
+    isfile(srcS) || return
+    try
+        libpath = joinpath(tempdir(), "libbp_blake3_avx512.$(getpid()).so")
+        run(pipeline(`$cc -shared -fPIC -o $libpath $srcS`; stdout=devnull, stderr=devnull))
+        h = Libdl.dlopen(libpath)
+        _ASM_FN[] = Libdl.dlsym(h, :blake3_hash_many_avx512)
+    catch e
+        @debug "Blake3: asm kernel unavailable, using pure Julia path" exception=e
+        _ASM_FN[] = Ptr{Cvoid}(0)
+    end
+    return
 end
 
 end # module Blake3

@@ -50,6 +50,33 @@
     @test blake3(data_1m) == jl_ref(data_1m)
 end
 
+@testitem "blake3_asm_kernel" tags = [:blake3] begin
+    # When the opt-in asm leaf is active, it must produce byte-identical CVs to the pure SIMD kernel.
+    # (The official-vector test above already runs blake3() through the asm path; this isolates the
+    # leaf so a divergence points straight at the ccall/layout, not the whole pipeline.) Skips on a
+    # host without the asm kernel (no AVX-512 / no cc / pref off) so CI on other machines stays green.
+    import BlazingPorts.Blake3 as B3
+
+    if !B3._asm_active()
+        @test_skip "blake3 asm kernel not active on this host"
+    else
+        for (nbatches, ctr) in [(1, UInt64(0)), (1, UInt64(99)), (3, UInt64(0))]
+            data = rand(UInt8, nbatches * 16 * B3.CHUNK_LEN)
+            GC.@preserve data begin
+                p = pointer(data)
+                for b in 0:nbatches-1
+                    base = p + b * 16 * B3.CHUNK_LEN
+                    cc = ctr + UInt64(b * 16)
+                    asm  = B3._compress_N_chunks_asm(base, cc)
+                    pure = B3._compress_N_chunks_body(B3._BasePtr16(base), Val(16),
+                        B3.KEY1,B3.KEY2,B3.KEY3,B3.KEY4,B3.KEY5,B3.KEY6,B3.KEY7,B3.KEY8, cc)
+                    @test all(Tuple(asm[i]) == Tuple(pure[i]) for i in 1:8)
+                end
+            end
+        end
+    end
+end
+
 @testitem "blake3_strictmode" tags = [:blake3] begin
     # The SIMD compress kernel must vectorize. The public blake3() must be type-stable.
     # We test the SIMD inner kernel directly (the per-chunk compression for N=8 chunks).
