@@ -173,6 +173,25 @@ English/ASCII text is at parity; the gap is for accented/CJK/emoji-heavy text. I
 **StrictMode-feedback target** — a kernel with ~0 FP/int arithmetic, the conjectured blind spot of
 `kernel_report`'s arithmetic-intensity model.
 
+## byte-ops family (bytecount · base64 · hex · float-parse) → the shuffle-SIMD gap class
+
+A batch probe of the rest of the "shuffle/lookup-SIMD" shortlist confirms a coherent pattern:
+
+![Byte-ops: Julia stdlib vs Rust SIMD](assets/byteops.png)
+
+- **bytecount → parity.** `count(==(b), v)` 20.8 vs `bytecount` 23.9 GB/s = **0.87×**. A masked-compare +
+  popcount reduction is exactly what LLVM auto-vectorizes, so Julia is already there. (An earlier *cold*
+  reading of 2.7 GB/s was a measurement artifact — the warm median is fine.)
+- **base64 encode → 27× gap.** `Base64.base64encode` 0.43 vs `base64-simd` 11.6 GB/s.
+- **hex encode → 4.3× gap.** `bytes2hex` 2.09 vs `faster-hex` 9.02 GB/s.
+- **float parse → 3× gap.** `parse(Float64,_)` 13 vs `lexical-core` 38 Mfloat/s (branchy parsing, not shuffle).
+
+The lesson is sharp: **Julia matches Rust when LLVM can auto-vectorize the kernel (bytecount), but loses
+4–27× on genuine `pshufb`-lookup/shuffle kernels** (base64, hex, and UTF-8 multibyte above) that LLVM won't
+synthesize and Julia's stdlib codes scalar. Together these form a **coherent cluster**: a pure-Julia SIMD
+byte-transcoding/validation library (utf8 + base64 + hex) would be both a real ecosystem contribution and the
+ideal StrictMode shuffle-kernel feedback vehicle.
+
 ## regex / ripgrep → ⚠ large gap, but PCRE2(C)-vs-Rust (not Julia-vs-Rust)
 
 Julia's `Regex` is **PCRE2** (a JIT'd C library); the Rust `regex` crate is a lazy-DFA with a Teddy/memchr

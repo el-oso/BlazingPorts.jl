@@ -21,6 +21,9 @@ fundamental trade-off. Every result below is single-threaded (`julia -t 1`, `tas
 | **simd-json** | JSON.jl ≥1.6 + stage-1 SIMD POC (fork) | tape 0.66×; stage-1 kernel ~28× scalar; **~4× simd-json on long-string JSON**, ~0.85× short | ⚠ **Gap / POC** (+ fixed StrictMode F32) |
 | **regex** | Base `Regex` (PCRE2, C) | regex crate **13×** (alternation) / **54×** (backtracking+anchor); 1.3–1.5× simple patterns | ⚠ **Gap** — but PCRE2(C)-vs-Rust; pure-Julia engine is a massive port |
 | **simdutf8** | `isvalid(::String)` | ASCII **parity** (0.92×, already SIMD); **multibyte 0.09× (11× gap)** vs simdutf8 | ⚠ **Gap** (pure Julia) — bounded SIMD-validator port; StrictMode shuffle-kernel target |
+| **base64 / hex** | `Base64`, `bytes2hex` | base64 **27×**, hex **4.3×** vs SIMD pshufb | ⚠ **Gap** (pure Julia) — shuffle-SIMD transcoding |
+| **bytecount** | `count(==(b), v)` | **0.87× (parity)** — Julia auto-vectorizes | ⏭ Skip — Julia already SIMD |
+| **lexical** (float parse) | `parse(Float64, _)` | **3×** (13 vs 38 Mfloat/s) | ⚠ Gap — branchy parse, lower priority |
 | **ryu** | `Base.Ryu.writeshortest` | 0.76–2.05× (value-dependent) | ⏭ Skip — Base ships it |
 | **roaring** | `Base.BitSet` | value-dependent (membership wins) | ⏭ Skip |
 | **bumpalo** | `Bumper.jl` | parity + true zero-GC | ⏭ Skip — ecosystem has it |

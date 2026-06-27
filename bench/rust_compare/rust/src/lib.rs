@@ -667,3 +667,59 @@ pub extern "C" fn bp_simdutf8_validate(p: *const u8, len: usize) -> bool {
 pub extern "C" fn bp_std_validate(p: *const u8, len: usize) -> bool {
     std::str::from_utf8(unsafe { std::slice::from_raw_parts(p, len) }).is_ok()
 }
+
+// ── shuffle/lookup-SIMD family: bytecount, base64, hex transcoding, lexical float parse ──────────────
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_bytecount(p: *const u8, len: usize, needle: u8) -> usize {
+    bytecount::count(unsafe { std::slice::from_raw_parts(p, len) }, needle)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_base64_encode(src: *const u8, slen: usize, dst: *mut u8, dcap: usize) -> usize {
+    let s = unsafe { std::slice::from_raw_parts(src, slen) };
+    let d = unsafe { std::slice::from_raw_parts_mut(dst, dcap) };
+    base64_simd::STANDARD.encode(s, base64_simd::Out::from_slice(d)).len()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_base64_decode(src: *const u8, slen: usize, dst: *mut u8, dcap: usize) -> isize {
+    let s = unsafe { std::slice::from_raw_parts(src, slen) };
+    let d = unsafe { std::slice::from_raw_parts_mut(dst, dcap) };
+    match base64_simd::STANDARD.decode(s, base64_simd::Out::from_slice(d)) { Ok(o) => o.len() as isize, Err(_) => -1 }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hex_encode(src: *const u8, slen: usize, dst: *mut u8) -> bool {
+    let s = unsafe { std::slice::from_raw_parts(src, slen) };
+    let d = unsafe { std::slice::from_raw_parts_mut(dst, slen * 2) };
+    faster_hex::hex_encode(s, d).is_ok()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hex_decode(src: *const u8, slen: usize, dst: *mut u8) -> bool {
+    let s = unsafe { std::slice::from_raw_parts(src, slen) };
+    let d = unsafe { std::slice::from_raw_parts_mut(dst, slen / 2) };
+    faster_hex::hex_decode(s, d).is_ok()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_lexical_sum_f64(p: *const u8, len: usize) -> f64 {
+    let s = unsafe { std::slice::from_raw_parts(p, len) };
+    let (mut sum, mut i) = (0.0f64, 0usize);
+    while i < len {
+        while i < len && s[i] == b' ' { i += 1; }
+        if i >= len { break; }
+        let start = i;
+        while i < len && s[i] != b' ' { i += 1; }
+        if let Ok(v) = lexical_core::parse::<f64>(&s[start..i]) { sum += v; }
+    }
+    sum
+}
+
+// allocating encode (matches Julia base64encode/bytes2hex which allocate the output String) — fair
+// idiomatic-vs-idiomatic, both pay output allocation; isolates the SIMD-vs-scalar transform.
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_base64_encode_alloc(src: *const u8, slen: usize) -> usize {
+    let out = base64_simd::STANDARD.encode_to_string(unsafe { std::slice::from_raw_parts(src, slen) });
+    let n = out.len(); std::hint::black_box(out); n
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_hex_encode_alloc(src: *const u8, slen: usize) -> usize {
+    let out = faster_hex::hex_string(unsafe { std::slice::from_raw_parts(src, slen) });
+    let n = out.len(); std::hint::black_box(out); n
+}
