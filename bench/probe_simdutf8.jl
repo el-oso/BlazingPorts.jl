@@ -26,7 +26,9 @@ function gen_mixed(target::Int)
     String(take!(io))
 end
 
+import BlazingPorts.Utf8: isvalid_utf8
 @noinline jl_valid(s::String) = isvalid(s)
+@noinline ours_valid(b::Vector{UInt8}) = isvalid_utf8(b)
 @noinline rs_simd(b::Vector{UInt8}) =
     GC.@preserve b ccall((:bp_simdutf8_validate, LIB), Bool, (Ptr{UInt8}, Csize_t), b, length(b))
 @noinline rs_std(b::Vector{UInt8}) =
@@ -36,15 +38,16 @@ probes = Probe[]
 for (cname, str) in (("ASCII", gen_ascii(16 * 1024 * 1024)), ("mixed UTF-8", gen_mixed(16 * 1024 * 1024)))
     bytes = Vector{UInt8}(codeunits(str)); nb = length(bytes)
     # sanity: all three agree it's valid
-    (jl_valid(str) && rs_simd(bytes) && rs_std(bytes)) || @warn "validation disagreement ($cname)"
+    (jl_valid(str) && ours_valid(bytes) && rs_simd(bytes) && rs_std(bytes)) || @warn "validation disagreement ($cname)"
     g(p) = nb / p.median / 1e9
     println("\n=== UTF-8 validation, $cname, $(round(nb/1024^2; digits=2)) MiB, single-thread ===")
-    p_jl  = run_probe("Julia isvalid (scalar): $cname", () -> jl_valid(str);           seconds = 4.0)
-    p_sj  = run_probe("simdutf8 (SIMD): $cname",         () -> rs_simd(bytes);  seconds = 4.0)
-    p_std = run_probe("Rust std (scalar): $cname",       () -> rs_std(bytes);   seconds = 4.0)
-    @printf("  Julia isvalid %.2f  |  Rust std %.2f  |  simdutf8 %.2f GB/s  → Julia/simdutf8 = %.2f×  (simdutf8/std = %.1f×)\n",
-        g(p_jl), g(p_std), g(p_sj), g(p_jl) / g(p_sj), g(p_sj) / g(p_std))
-    push!(probes, p_jl, p_std, p_sj)
+    p_jl   = run_probe("Julia isvalid (scalar): $cname", () -> jl_valid(str);    seconds = 4.0)
+    p_ours = run_probe("BlazingPorts.Utf8 (SIMD): $cname", () -> ours_valid(bytes); seconds = 4.0)
+    p_sj   = run_probe("simdutf8 (SIMD): $cname",         () -> rs_simd(bytes);   seconds = 4.0)
+    p_std  = run_probe("Rust std (scalar): $cname",       () -> rs_std(bytes);    seconds = 4.0)
+    @printf("  Julia isvalid %.2f  |  OURS %.2f  |  simdutf8 %.2f  |  Rust std %.2f GB/s  → ours/Base %.1f×, ours/simdutf8 %.2f×\n",
+        g(p_jl), g(p_ours), g(p_sj), g(p_std), g(p_ours) / g(p_jl), g(p_ours) / g(p_sj))
+    push!(probes, p_jl, p_ours, p_std, p_sj)
 end
 
 save_probes("simdutf8", probes)

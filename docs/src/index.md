@@ -20,7 +20,7 @@ fundamental trade-off. Every result below is single-threaded (`julia -t 1`, `tas
 | **blake3** | `Blake3` (ours) | **compute beats pure-Rust 1.60× AND the bundled hand-asm** (8.6–9.0 vs 8.4 GB/s, 0 spills); full pipeline trails 13%, entirely the chained-loop register allocation; 7.4× over Julia ecosystem | ✅ **Beats Rust & asm on compute** (pure Julia) |
 | **simd-json** | JSON.jl ≥1.6 + stage-1 SIMD POC (fork) | tape 0.66×; stage-1 kernel ~28× scalar; **~4× simd-json on long-string JSON**, ~0.85× short | ⚠ **Gap / POC** (+ fixed StrictMode F32) |
 | **regex** | Base `Regex` (PCRE2, C) | regex crate **13×** (alternation) / **54×** (backtracking+anchor); 1.3–1.5× simple patterns | ⚠ **Gap** — but PCRE2(C)-vs-Rust; pure-Julia engine is a massive port |
-| **simdutf8** | `isvalid(::String)` | ASCII **parity** (0.92×, already SIMD); **multibyte 0.09× (11× gap)** vs simdutf8 | ⚠ **Gap** (pure Julia) — bounded SIMD-validator port; StrictMode shuffle-kernel target |
+| **simdutf8** | `Utf8.isvalid_utf8` (ours) | **6× Base on multibyte** (9.8 vs 1.66 GB/s), ASCII parity; byte-exact; 0.56× simdutf8 (SSE16) | ✅ **PORTED** (pure-Julia lemire SIMD) — found **StrictMode F33** |
 | **base64 / hex** | `Base64`, `bytes2hex` | base64 **27×**, hex **4.3×** vs SIMD pshufb | ⚠ **Gap** (pure Julia) — shuffle-SIMD transcoding |
 | **bytecount** | `count(==(b), v)` | **0.87× (parity)** — Julia auto-vectorizes | ⏭ Skip — Julia already SIMD |
 | **lexical** (float parse) | `parse(Float64, _)` | **3×** (13 vs 38 Mfloat/s) | ⚠ Gap — branchy parse, lower priority |

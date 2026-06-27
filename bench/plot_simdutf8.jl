@@ -7,20 +7,21 @@ d = JSON.parsefile(joinpath(HERE, "results", "simdutf8.json"))
 cmap = Dict(c["label"] => c for c in d["contenders"])
 gbs(label) = NB / cmap[label]["median"] / 1e9
 corp = ["ASCII", "mixed UTF-8"]
-jl  = [gbs("Julia isvalid (scalar): $c") for c in corp]
-std = [gbs("Rust std (scalar): $c") for c in corp]
-sj  = [gbs("simdutf8 (SIMD): $c") for c in corp]
+jl   = [gbs("Julia isvalid (scalar): $c") for c in corp]
+ours = [gbs("BlazingPorts.Utf8 (SIMD): $c") for c in corp]
+std  = [gbs("Rust std (scalar): $c") for c in corp]
+sj   = [gbs("simdutf8 (SIMD): $c") for c in corp]
 
-p = groupedbar(["ASCII\n(fast path)", "mixed UTF-8\n(multibyte)"], hcat(jl, std, sj);
-    label = ["Julia isvalid" "Rust std (scalar)" "simdutf8 (SIMD)"],
-    color = [:seagreen :gray :slateblue], yscale = :log10,
+p = groupedbar(["ASCII\n(fast path)", "mixed UTF-8\n(multibyte)"], hcat(jl, ours, sj, std);
+    label = ["Base isvalid" "BlazingPorts.Utf8 (ours)" "simdutf8 (Rust)" "Rust std (scalar)"],
+    color = [:seagreen :firebrick :slateblue :gray], yscale = :log10,
     ylabel = "validation GB/s  (log, higher = better)",
-    title = "UTF-8 validation: Julia isvalid vs Rust std & simdutf8  (16 MiB, single-thread)",
-    titlefontsize = 10, legend = :bottomleft, framestyle = :box, dpi = 200, size = (880, 560),
+    title = "UTF-8 validation: our pure-Julia SIMD validator vs Base & simdutf8  (16 MiB, single-thread)",
+    titlefontsize = 10, legend = :bottomleft, framestyle = :box, dpi = 200, size = (920, 560),
     ylims = (0.2, 150), bar_width = 0.7)
-# annotate the Julia/simdutf8 ratio above each group
-for (i, r) in enumerate(jl ./ sj)
-    annotate!(p, i, max(jl[i], sj[i]) * 1.7, text(@sprintf("Julia = %.2f× simdutf8", r), 9, :center))
+# annotate the ours/Base ratio above each group
+for (i, r) in enumerate(ours ./ jl)
+    annotate!(p, i, maximum((jl[i], ours[i], sj[i])) * 1.7, text(@sprintf("ours = %.1f× Base", r), 9, :center))
 end
 plot!(p; xlims = (0.4, 2.6))
 for dir in (joinpath(HERE,"..","docs","assets"), joinpath(HERE,"..","docs","src","assets"))

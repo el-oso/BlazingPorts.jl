@@ -153,25 +153,26 @@ isn't the bottleneck there) — full size-sweep in the fork's `perf/string_scan_
 `@assert_no_scalar_loops` was blind to a scalar loop coexisting with vectorized code. Reproduce:
 `bench/probe_simdjson.jl` → `bench/results/simdjson.json` → `bench/plot_simdjson.jl`.
 
-## simdutf8 → ⚠ genuine 11× gap on multibyte UTF-8 (pure Julia — a real port target)
+## simdutf8 → `Utf8` — ✅ PORTED: pure-Julia SIMD validator, 6× Base on multibyte (+ StrictMode F33)
 
-UTF-8 validation is a **shuffle/range-check SIMD kernel** (the lemire algorithm: `pshufb` lookups +
-range comparisons, near-zero *arithmetic* intensity) — the unexplored "non-arithmetic SIMD" class. Two
-regimes, 16 MiB, single-thread:
+The probe found an 11× gap: Julia's `isvalid` SIMD-checks the ASCII fast-path but **falls to scalar the
+moment multibyte appears** (1.65 vs simdutf8 17.7 GB/s). Unlike regex (PCRE2 is C) this is a genuine
+*pure-Julia* gap — so we **ported it**: `BlazingPorts.Utf8.isvalid_utf8`, the lemire/simdjson algorithm
+(three `pshufb` nibble-lookup tables + range checks via `Vec{16,UInt8}` `<16 x i8>` + an `llvmcall`
+`pshufb` primitive). **Byte-exact with `Base.isvalid`** (~93k random + crafted cases: overlong, surrogate,
+truncated, too-large, block-straddling). 16 MiB, single-thread:
 
-![UTF-8 validation: Julia isvalid vs Rust std & simdutf8](assets/simdutf8.png)
+![UTF-8 validation: our SIMD validator vs Base & simdutf8](assets/simdutf8.png)
 
-- **ASCII fast-path: parity.** Julia `isvalid` 72.1 vs simdutf8 78.5 GB/s = **0.92×** (and **1.7× over Rust
-  scalar `std::str::from_utf8`**) — Julia already SIMD-checks the all-`<0x80` case.
-- **Mixed UTF-8 (~1-in-6 multibyte): an 11× gap.** Julia falls to its scalar multibyte codepath —
-  **1.65 vs simdutf8 17.66 GB/s = 0.09×** — the moment non-ASCII appears. (Rust scalar `std` is 0.40;
-  simdutf8 is 44× over its own scalar.)
+- **Mixed UTF-8 (multibyte): `isvalid_utf8` 9.8 vs Base 1.66 GB/s = 5.9× faster** (0.56× simdutf8 — the
+  residual is SSE-16 vs its AVX2-32; an N=32 widening would roughly close it).
+- **ASCII fast-path: ~parity** with Base (both bandwidth-bound; the chunked `movemask` ASCII check).
 
-Unlike regex (PCRE2 is C) this is a **genuine Julia-vs-SIMD gap in pure Julia code**, and a **bounded port**:
-a pure-Julia SIMD validator (lemire stage-2 continuation/range checks via `Vec`/shuffles). Workload note:
-English/ASCII text is at parity; the gap is for accented/CJK/emoji-heavy text. It's also the campaign's best
-**StrictMode-feedback target** — a kernel with ~0 FP/int arithmetic, the conjectured blind spot of
-`kernel_report`'s arithmetic-intensity model.
+This is a SHUFFLE/LOOKUP kernel (≈0 arithmetic intensity), and auditing it produced **StrictMode F33**:
+`kernel_report` counts FP/int arithmetic + memory ops but **not** the `pshufb` shuffles — the kernel's
+actual work — so it mischaracterizes a perfectly-vectorized shuffle kernel ("balanced / try cache
+blocking", irrelevant for a shuffle-port-bound kernel). The conjectured data-movement blind spot, confirmed.
+Next: the same `pshufb` machinery folds straight into a **base64 / hex** SIMD library (the byte-ops cluster).
 
 ## byte-ops family (bytecount · base64 · hex · float-parse) → the shuffle-SIMD gap class
 

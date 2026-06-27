@@ -32,6 +32,7 @@ include("StringSearch.jl")
 include("IntFormat.jl")
 include("SwissDict.jl")
 include("Blake3.jl")
+include("Utf8.jl")
 
 using .SmallMatrix
 using .SpecialFns
@@ -41,5 +42,6 @@ using .StringSearch
 using .IntFormat
 using .SwissDict
 using .Blake3
+using .Utf8
 
 end # module BlazingPorts
