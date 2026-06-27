@@ -52,6 +52,11 @@ Project-specific requirements. Sibling to PureFFT.jl; the campaign tracker is
 
 - `isnothing(x)` / `!isnothing(x)` — never `=== nothing`.
 - Regenerate the relevant `docs/assets/*.png` probe plot before pushing a result.
+- **Plots are VIOLIN plots, never bar plots.** We save the full per-sample distribution (`samples`) in
+  `bench/results/*.json` for exactly this reason — every comparison plot draws `violin!` of the saved
+  per-sample throughputs (2–98% clipped) with a median annotation, grouped by op/corpus and colored by
+  contender. Template: `bench/plot_simdjson.jl` / `bench/plot_byteops_ports.jl`. A `groupedbar` hides the
+  distribution (σ) the campaign exists to show — don't use it.
 - Every probe/skip gets a dated row in `../blazingly-fast-rust-crates.md`'s gap log.
 - Commit author email: `15278831+el-oso@users.noreply.github.com`.
 - End commit messages with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.

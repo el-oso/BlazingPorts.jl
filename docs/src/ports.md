@@ -148,10 +148,37 @@ lazy architecture: a `Vec{64,UInt8}` classifier (`<64 x i8>` AVX-512 `vpcmpb` + 
 byte-by-byte scan for the end of a string. POC on a fork (`el-oso/JSON.jl`, branch
 `strictmode-simd-stage1`): **the kernel is ~28× the scalar byte loop**, and end-to-end it's
 **~4× faster than simd-json on long-string JSON** but ~10–16% slower on short-field JSON (string scanning
-isn't the bottleneck there) — full size-sweep in the fork's `perf/string_scan_bench.md`. Byte-exact
-(JSONTestSuite 283/283). The exercise also surfaced and **fixed a StrictMode bug (F32)**:
-`@assert_no_scalar_loops` was blind to a scalar loop coexisting with vectorized code. Reproduce:
-`bench/probe_simdjson.jl` → `bench/results/simdjson.json` → `bench/plot_simdjson.jl`.
+isn't the bottleneck there). Byte-exact (JSONTestSuite 283/283).
+
+**Size sweep** — `isvalidjson` throughput (GB/s, document bytes ÷ median parse time, *higher = better*; the
+three GB/s columns are independent absolute measurements, the `×` columns are ratios) over 4 MiB docs whose
+string fields are each `strlen` bytes, single-thread, core 11, σ ≤ 8% (from the fork's
+`perf/string_scan_bench.md`):
+
+| string len (B) | stock JSON.jl | this branch (SIMD) | simd-json | branch ÷ stock | branch ÷ simd-json |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 0.475 | 0.426 | 0.278 | 0.90× | **1.53×** |
+| 8 | 0.571 | 0.531 | 0.342 | 0.93× | **1.55×** |
+| 12 | 0.683 | 0.602 | 0.753 | 0.88× | 0.80× |
+| 16 | 0.772 | 0.647 | 0.867 | 0.84× | 0.75× |
+| 24 | 0.786 | 0.780 | 1.013 | 0.99×¹ | 0.77× |
+| 32 | 0.914 | 0.778 | 1.161 | 0.85× | 0.67× |
+| 48 | 1.097 | 1.172 | 1.349 | 1.07× | 0.87× |
+| 64 | 1.242 | 1.486 | 1.468 | 1.20× | 1.01× |
+| 96 | 1.239 | 2.061 | 1.789 | 1.66× | 1.15× |
+| 128 | 1.296 | 2.672 | 1.934 | 2.06× | 1.38× |
+| 256 | 1.671 | 4.871 | 2.293 | 2.92× | 2.12× |
+| 512 | 1.990 | 8.790 | 3.119 | **4.42×** | **2.82×** |
+
+¹ stock σ=14% at L=24 — treat that ratio as noisy.
+
+The branch crosses over stock at **~48 B** and grows to **4.4× stock / 2.8× simd-json at 512 B** (the SIMD
+classifier scans at memory-bandwidth speed; the scalar loop plods byte-by-byte). Below ~32 B it's a
+~10–16% regression — `code_native` shows the root cause is purely the *size* of the inlined SIMD scan
+(`parsestring` becomes ~3× stock's instruction count), not the loop structure. The exercise also surfaced
+and **fixed a StrictMode bug (F32)**: `@assert_no_scalar_loops` was blind to a scalar loop coexisting with
+vectorized code. Reproduce: `bench/probe_simdjson.jl` → `bench/results/simdjson.json` →
+`bench/plot_simdjson.jl`.
 
 ## simdutf8 → `Utf8` — ✅ PORTED: pure-Julia SIMD validator that **beats the Rust crate** on multibyte
 

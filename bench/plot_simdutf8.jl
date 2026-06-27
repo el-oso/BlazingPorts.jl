@@ -1,30 +1,41 @@
-# UTF-8 validation throughput grouped bars from SAVED data (no re-benchmark). Log-y (range ~200×).
+# UTF-8 validation throughput — VIOLIN of the saved per-sample distributions (no re-benchmark). Log-y.
 # Regenerate:  julia --project=bench bench/plot_simdutf8.jl
 using JSON, StatsPlots, Printf, Statistics
 const HERE = @__DIR__
 const NB = 16 * 1024 * 1024
 d = JSON.parsefile(joinpath(HERE, "results", "simdutf8.json"))
 cmap = Dict(c["label"] => c for c in d["contenders"])
-gbs(label) = NB / cmap[label]["median"] / 1e9
-corp = ["ASCII", "mixed UTF-8"]
-jl   = [gbs("Julia isvalid (scalar): $c") for c in corp]
-ours = [gbs("BlazingPorts.Utf8 (SIMD): $c") for c in corp]
-std  = [gbs("Rust std (scalar): $c") for c in corp]
-sj   = [gbs("simdutf8 (SIMD): $c") for c in corp]
+gbs(c) = NB ./ Float64.(c["samples"]) ./ 1e9
+med(c) = NB / c["median"] / 1e9
 
-p = groupedbar(["ASCII\n(fast path)", "mixed UTF-8\n(multibyte)"], hcat(jl, ours, sj, std);
-    label = ["Base isvalid" "BlazingPorts.Utf8 (ours)" "simdutf8 (Rust)" "Rust std (scalar)"],
-    color = [:seagreen :firebrick :slateblue :gray], yscale = :log10,
-    ylabel = "validation GB/s  (log, higher = better)",
-    title = "UTF-8 validation: our pure-Julia SIMD validator vs Base & simdutf8  (16 MiB, single-thread)",
-    titlefontsize = 10, legend = :bottomleft, framestyle = :box, dpi = 200, size = (920, 560),
-    ylims = (0.2, 150), bar_width = 0.7)
-# annotate the ours/Base ratio above each group
-for (i, r) in enumerate(ours ./ jl)
-    annotate!(p, i, maximum((jl[i], ours[i], sj[i])) * 1.7, text(@sprintf("ours = %.1f× Base", r), 9, :center))
+corpora = ["ASCII", "mixed UTF-8"]
+# (key-prefix, color, legend role)
+roles = [("Julia isvalid (scalar)",   :seagreen,  "Base isvalid"),
+         ("BlazingPorts.Utf8 (SIMD)", :firebrick, "BlazingPorts.Utf8 (ours)"),
+         ("simdutf8 (SIMD)",          :slateblue, "simdutf8 (Rust)"),
+         ("Rust std (scalar)",        :gray,      "Rust std (scalar)")]
+step = length(roles) + 1
+
+p = plot(; ylabel = "validation GB/s  (log, higher = better)", yscale = :log10, ylims = (0.3, 140),
+    title = "UTF-8 validation: our SIMD validator vs Base & simdutf8  (16 MiB, single-thread)",
+    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560))
+for (g, corp) in enumerate(corpora)
+    for (c, (pre, col, role)) in enumerate(roles)
+        key = "$pre: $corp"; haskey(cmap, key) || continue
+        x = (g - 1) * step + c
+        gv = gbs(cmap[key]); lo, hi = quantile(gv, 0.02), quantile(gv, 0.98)
+        gv = filter(v -> lo <= v <= hi, gv)
+        violin!(p, fill(x, length(gv)), gv; color = col, alpha = 0.65, linewidth = 0, bar_width = 0.7,
+            label = (g == 1 ? role : ""))
+        annotate!(p, x, med(cmap[key]) * 1.2, text(@sprintf("%.1f", med(cmap[key])), 7, :center))
+    end
+    o = med(cmap["BlazingPorts.Utf8 (SIMD): $corp"]); s = med(cmap["simdutf8 (SIMD): $corp"])
+    annotate!(p, (g - 1) * step + 2.5, 0.62, text(@sprintf("ours = %.2f× simdutf8", o / s), 8, :center))
 end
-plot!(p; xlims = (0.4, 2.6))
-for dir in (joinpath(HERE,"..","docs","assets"), joinpath(HERE,"..","docs","src","assets"))
+plot!(p; xticks = ([(g - 1) * step + 2.5 for g in 1:length(corpora)],
+                   ["ASCII\n(fast path)", "mixed UTF-8\n(multibyte)"]),
+      xlims = (0.3, length(corpora) * step - 0.7))
+for dir in (joinpath(HERE, "..", "docs", "assets"), joinpath(HERE, "..", "docs", "src", "assets"))
     mkpath(dir); savefig(p, joinpath(dir, "simdutf8.png"))
 end
 println("wrote docs/assets/simdutf8.png (+ docs/src/assets)")

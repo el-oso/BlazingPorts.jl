@@ -1,29 +1,39 @@
-# Combined "byte-ops / shuffle-SIMD family" plot from SAVED data (bytecount + transcode + lexical).
+# Combined "byte-ops / shuffle-SIMD family" GAP plot — VIOLIN of the saved per-sample distributions
+# (bytecount + transcode + lexical), Julia stdlib vs the Rust SIMD crate. No re-benchmark.
 # Regenerate:  julia --project=bench bench/plot_byteops.jl
-using JSON, StatsPlots, Printf
+using JSON, StatsPlots, Printf, Statistics
 const HERE = @__DIR__
 const MiB = 1024 * 1024
 load(c) = Dict(x["label"] => x for x in JSON.parsefile(joinpath(HERE, "results", "$c.json"))["contenders"])
 bc, tc, lx = load("bytecount"), load("transcode"), load("lexical")
-gb(d, label, nb) = nb / d[label]["median"] / 1e9
-ops = [   # (name, Julia GB/s, Rust-SIMD GB/s) — ordered by widening gap
-    ("bytecount",      gb(bc, "Julia count(==(b))",  16MiB),  gb(bc, "bytecount (SIMD)",  16MiB)),
-    ("hex encode",     gb(tc, "Julia hex",           12MiB),  gb(tc, "Rust SIMD hex",     12MiB)),
-    ("float parse",    gb(lx, "Julia parse(Float64)", 12.09MiB), gb(lx, "lexical-core",   12.09MiB)),
-    ("base64 encode",  gb(tc, "Julia base64",        12MiB),  gb(tc, "Rust SIMD base64",  12MiB)),
-]
-labels = [o[1] for o in ops]; jl = [o[2] for o in ops]; rs = [o[3] for o in ops]
-p = groupedbar(labels, hcat(jl, rs); label = ["Julia stdlib" "Rust SIMD crate"],
-    color = [:seagreen :slateblue], yscale = :log10, ylabel = "GB/s  (log, higher = better)",
-    title = "Byte-ops: Julia stdlib vs Rust SIMD  (single-thread) — shuffle/lookup-SIMD gap class",
-    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (960, 560),
-    ylims = (0.1, 60), bar_width = 0.7)
-for (i, o) in enumerate(ops)
-    r = o[2] / o[3]
-    annotate!(p, i, max(o[2], o[3]) * 1.6, text(r > 0.8 ? "parity" : @sprintf("%.0f× gap", 1/r), 9, :center))
+gbs(c, nb) = nb ./ Float64.(c["samples"]) ./ 1e9
+med(c, nb) = nb / c["median"] / 1e9
+
+# (name, julia-contender, rust-contender, source-dict, nb) — ordered by widening gap
+ops = [("bytecount",     bc["Julia count(==(b))"],   bc["bytecount (SIMD)"], 16MiB),
+       ("hex encode",    tc["Julia hex"],            tc["Rust SIMD hex"],    12MiB),
+       ("float parse",   lx["Julia parse(Float64)"], lx["lexical-core"],     12.09MiB),
+       ("base64 encode", tc["Julia base64"],         tc["Rust SIMD base64"], 12MiB)]
+roles = [(:seagreen, "Julia stdlib"), (:slateblue, "Rust SIMD crate")]
+step = 3
+
+p = plot(; ylabel = "GB/s  (log, higher = better)", yscale = :log10, ylims = (0.1, 80),
+    title = "Byte-ops: Julia stdlib vs Rust SIMD (single-thread) — the shuffle/lookup-SIMD gap class",
+    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560))
+for (g, (name, jc, rc, nb)) in enumerate(ops)
+    for (c, cc) in enumerate((jc, rc))
+        x = (g - 1) * step + c
+        gv = gbs(cc, nb); lo, hi = quantile(gv, 0.02), quantile(gv, 0.98); gv = filter(v -> lo <= v <= hi, gv)
+        violin!(p, fill(x, length(gv)), gv; color = roles[c][1], alpha = 0.65, linewidth = 0, bar_width = 0.7,
+            label = (g == 1 ? roles[c][2] : ""))
+        annotate!(p, x, med(cc, nb) * 1.25, text(@sprintf("%.2f", med(cc, nb)), 7, :center))
+    end
+    r = med(jc, nb) / med(rc, nb)
+    annotate!(p, (g - 1) * step + 1.5, 0.12, text(r > 0.8 ? "parity" : @sprintf("%.0f× gap", 1 / r), 8, :center))
 end
-plot!(p; xlims = (0.3, 4.7))
-for dir in (joinpath(HERE,"..","docs","assets"), joinpath(HERE,"..","docs","src","assets"))
+plot!(p; xticks = ([(g - 1) * step + 1.5 for g in 1:length(ops)], [o[1] for o in ops]),
+      xlims = (0.3, length(ops) * step - 0.7))
+for dir in (joinpath(HERE, "..", "docs", "assets"), joinpath(HERE, "..", "docs", "src", "assets"))
     mkpath(dir); savefig(p, joinpath(dir, "byteops.png"))
 end
 println("wrote docs/assets/byteops.png (+ docs/src/assets)")
