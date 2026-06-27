@@ -99,15 +99,35 @@ one-liner: *our BLAKE3 computes faster than hand-tuned assembly; the asm's only 
 register-allocation trick on the input plumbing.* (StrictMode's `register_report` diagnostic — F31 — came
 out of this hunt.)
 
-### We chose to stay pure Julia — no assembly
+### Pure Julia by default — opt into the asm with one preference
 
-We even hand-wrote our own AVX-512 `.S` to confirm the ceiling is reachable from Julia (it is — `ccall`
-into asm hits 8.36). But our from-scratch attempt, with every line verified against the spec, still had a
-subtle byte-exact bug — the perfect illustration of asm's cost. So the decision: **stay pure SIMD.jl, no
-assembly.** Correct-by-construction, ~87% of hand-asm, and **faster than every compiler including Rust's**.
-The last 13% is buyable only with hand-scheduled assembly and the fragility that comes with it — not a
-trade we make. (The asm experiment lives on the `blake3-handasm` branch.) Reproduce the whole comparison:
-`bench/probe_blake3_kernels.jl` (3-way kernel proof) and `bench/probe_blake3.jl` (full pipeline).
+The portable, correct-by-construction default is **pure SIMD.jl, no assembly**: ~87% of hand-asm and
+**faster than every compiler including Rust's**. That last 13% is buyable only with hand-scheduled
+assembly. We make it **opt-in** rather than refusing it: `Blake3` ships blake3's own CC0 AVX-512 kernel
+(`deps/blake3/blake3_avx512_x86-64_unix.S`, the proven 8.36 GB/s `.S`, not our from-scratch attempt) and
+routes the leaf compress through it **behind the `Preferences.jl` switch `blake3_asm`**.
+
+- **Default = on where available.** At load, when the host is x86-64 Linux with AVX-512F and a `cc` is on
+  `PATH`, the vendored `.S` is assembled and `dlopen`ed; otherwise the pure path is used. The switch only
+  swaps the **leaf** — the tree reduce and root stay pure Julia.
+- **End-to-end effect** (full `blake3()`, 16 MiB, single-thread): the asm leaf lifts throughput **1.16×**
+  (6.45 → 7.50 GB/s), essentially closing the 13% kernel gap at the pipeline level.
+
+![BLAKE3 full hash(): the blake3_asm switch](assets/blake3_asm_switch.png)
+
+To force the portable pure path (e.g. for reproducible/portable builds), set the preference and restart:
+
+```julia
+using Preferences
+set_preferences!(Base.UUID("6a76645a-1c79-4c35-96ac-450b50bde595"), "blake3_asm" => false)
+```
+
+The pure kernel remains the fallback whenever the asm is unavailable, so correctness never depends on the
+toolchain. (Our earlier *hand-written* asm experiment — which had a subtle byte-exact bug, illustrating
+asm's cost — lives on the `blake3-handasm` branch; the shipped switch uses blake3's vetted `.S` instead.)
+Reproduce the whole comparison: `bench/probe_blake3_kernels.jl` (3-way kernel proof **+** the asm-switch
+full-pipeline probe) and `bench/probe_blake3.jl` (full pipeline); `bench/plot_blake3_kernels.jl` regenerates
+both plots from the saved JSON.
 
 ## hashbrown → `SwissDict` — ⚖️ a fundamental trade-off
 

@@ -16,8 +16,10 @@ memchr-byte). Julia ports shipped only where a *fair re-probe* found a real gap:
 
 - **`Factorizations` (faer Cholesky + QR)** — beats faer at **all** sizes 256–2048, pure SIMD.jl, no asm. The win
   was the gemm *orchestration choice* (read the large operand in place), not codegen. Done.
-- **`Blake3`** — beats blake3's **pure-Rust** path 1.60×; 0.71× the bundled **hand-asm** crate (the 13% = the
-  chained-leaf's global register allocation, which no compiler frontend reproduces — stay pure Julia). Done.
+- **`Blake3`** — beats blake3's **pure-Rust** path 1.60×; the bundled **hand-asm** wins by 13% (the chained-leaf's
+  global register allocation, which no compiler frontend reproduces). Pure Julia is the portable default; the
+  `blake3_asm` **Preferences switch** (default on-where-available) opts the leaf into blake3's own CC0 `.S` to
+  buy that 13% back — full-hash **1.16×** end-to-end. Done.
 - **`StringSearch` (memchr substring)** — parity-to-beat vs memmem; **`IntFormat` (itoa)** — beats the crate. Done.
 - **`SwissDict` (hashbrown)** — `<:AbstractDict`; wins **miss-heavy** workloads, loses hit-heavy (a workload
   tradeoff, not a clean win). Done.

@@ -1,0 +1,15 @@
+blake3_avx512_x86-64_unix.S
+
+Vendored verbatim from the BLAKE3 reference implementation (crate `blake3`
+v1.8.5, file `c/blake3_avx512_x86-64_unix.S`). It is the hand-written AVX-512
+`blake3_hash_many_avx512` kernel.
+
+BLAKE3 is dual-licensed under CC0-1.0 and Apache-2.0-with-LLVM-exception. We
+include it here under CC0-1.0 (see LICENSE_CC0) — public domain, no attribution
+required, though we credit the BLAKE3 authors here.
+
+Upstream: https://github.com/BLAKE3-team/BLAKE3
+
+Used by BlazingPorts.Blake3 only as an OPT-IN kernel behind the Preferences
+switch `blake3_asm`. It is assembled at load time with the system `cc`; the
+pure-Julia SIMD.jl path is the portable default fallback.
