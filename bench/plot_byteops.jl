@@ -2,6 +2,7 @@
 # (bytecount + transcode + lexical), Julia stdlib vs the Rust SIMD crate. No re-benchmark.
 # Regenerate:  julia --project=bench bench/plot_byteops.jl
 using JSON, StatsPlots, Printf, Statistics
+using StatsPlots: mm          # margin unit (not exported by default)
 const HERE = @__DIR__
 const MiB = 1024 * 1024
 load(c) = Dict(x["label"] => x for x in JSON.parsefile(joinpath(HERE, "results", "$c.json"))["contenders"])
@@ -19,7 +20,8 @@ step = 3
 
 p = plot(; ylabel = "GB/s  (log, higher = better)", yscale = :log10, ylims = (0.1, 80),
     title = "Byte-ops: Julia stdlib vs Rust SIMD (single-thread) — the shuffle/lookup-SIMD gap class",
-    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560))
+    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560),
+    left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm)
 for (g, (name, jc, rc, nb)) in enumerate(ops)
     for (c, cc) in enumerate((jc, rc))
         x = (g - 1) * step + c

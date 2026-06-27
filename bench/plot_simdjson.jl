@@ -1,6 +1,7 @@
 # simd-json vs Julia JSON parsers VIOLIN from SAVED data (no re-benchmark).
 # Regenerate with:  julia --project=bench bench/plot_simdjson.jl
 using JSON, StatsPlots, Printf, Statistics
+using StatsPlots: mm          # margin unit (not exported by default)
 const HERE = @__DIR__
 const NB = 4 * 1024 * 1024   # doc size from probe_simdjson.jl (gen_json target); GB/s = NB / time
 d = JSON.parsefile(joinpath(HERE, "results", "simdjson.json"))
@@ -22,7 +23,8 @@ ttl = @sprintf("JSON parse, single-thread (JSON.jl ≥ 1.6):  isvalidjson %.2f v
     gb("JSON.isvalidjson (structural scan)") / gb("simd-json to_tape (lazy)"))
 p = plot(; legend = false, ylabel = "GB/s  (higher = better)", title = ttl, titlefontsize = 9,
     xticks = (collect(1:length(present)), labels[1:length(present)]), xlims = (0.4, length(present) + 0.6),
-    framestyle = :box, dpi = 200, size = (1040, 520), ylims = (0, maximum(meds) * 1.15))
+    framestyle = :box, dpi = 200, size = (1040, 520), ylims = (0, maximum(meds) * 1.15),
+    left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm)
 for (i, k) in enumerate(present)
     g = gbs(cmap[k]); hi = quantile(g, 0.98); lo = quantile(g, 0.02)
     g = filter(x -> lo <= x <= hi, g)

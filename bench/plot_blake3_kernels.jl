@@ -3,6 +3,7 @@
 # on the crate's hand-asm bar, proving the switch reaches the asm ceiling from Julia.
 # Regenerate with:  julia --project=bench bench/plot_blake3_kernels.jl
 using JSON, StatsPlots, Printf, Statistics
+using StatsPlots: mm          # margin unit (not exported by default)
 const HERE = @__DIR__
 const NB = 16 * 1024 * 1024
 d = JSON.parsefile(joinpath(HERE, "results", "blake3_kernels.json"))
@@ -16,7 +17,8 @@ ttl = @sprintf("BLAKE3 compress, single-thread:  Julia (LLVM) beats Rust (LLVM) 
     meds[2]/meds[1], meds[4], meds[3])
 p = plot(; legend = false, ylabel = "GB/s  (higher = better)", title = ttl, titlefontsize = 9,
     xticks = ([1,2,3,4], labels), xlims = (0.4, 4.6), framestyle = :box, dpi = 200,
-    size = (1040, 520), ylims = (0, maximum(meds) * 1.15))
+    size = (1040, 520), ylims = (0, maximum(meds) * 1.15),
+    left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm)
 for (i, k) in enumerate(keys3)
     g = gbs(cmap[k]); hi = quantile(g, 0.98); lo = quantile(g, 0.02)
     g = filter(x -> lo <= x <= hi, g)                       # clip rare timer-outlier tails
@@ -37,7 +39,8 @@ if all(haskey(cmap, k) for k in switch_keys)
     sttl = @sprintf("BLAKE3 full hash(), single-thread:  the blake3_asm switch lifts end-to-end throughput %.2f×", smeds[2]/smeds[1])
     ps = plot(; legend = false, ylabel = "GB/s  (higher = better)", title = sttl, titlefontsize = 10,
         xticks = ([1,2], slabels), xlims = (0.4, 2.6), framestyle = :box, dpi = 200,
-        size = (720, 500), ylims = (0, maximum(smeds) * 1.15))
+        size = (720, 500), ylims = (0, maximum(smeds) * 1.15),
+        left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm)
     for (i, k) in enumerate(switch_keys)
         gg = gbs(cmap[k]); hi = quantile(gg, 0.98); lo = quantile(gg, 0.02)
         gg = filter(x -> lo <= x <= hi, gg)

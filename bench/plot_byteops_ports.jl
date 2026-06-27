@@ -2,6 +2,7 @@
 # re-benchmark). Kernel-only (both sides preallocated). Regenerate:
 #   julia --project=bench bench/plot_byteops_ports.jl
 using JSON, StatsPlots, Printf, Statistics
+using StatsPlots: mm          # margin unit (not exported by default)
 const HERE = @__DIR__
 const NB = 12 * 1024 * 1024
 d = JSON.parsefile(joinpath(HERE, "results", "byteops_ports.json"))
@@ -18,7 +19,8 @@ roles = [("Julia stdlib (scalar, alloc)", :seagreen,  "Julia stdlib (scalar)"),
 
 p = plot(; ylabel = "GB/s  (log, higher = better)", yscale = :log10, ylims = (0.1, 40),
     title = "Ported byte-ops kernels vs Rust crates — kernel-only (12 MiB, single-thread)",
-    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560))
+    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560),
+    left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm)
 allmed = Float64[]
 for (g, op) in enumerate(ops)
     keys3 = ["Julia stdlib (scalar, alloc): $op", "BlazingPorts.ByteOps (SIMD): $op",

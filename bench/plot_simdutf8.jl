@@ -1,6 +1,7 @@
 # UTF-8 validation throughput — VIOLIN of the saved per-sample distributions (no re-benchmark). Log-y.
 # Regenerate:  julia --project=bench bench/plot_simdutf8.jl
 using JSON, StatsPlots, Printf, Statistics
+using StatsPlots: mm          # margin unit (not exported by default)
 const HERE = @__DIR__
 const NB = 16 * 1024 * 1024
 d = JSON.parsefile(joinpath(HERE, "results", "simdutf8.json"))
@@ -18,7 +19,8 @@ step = length(roles) + 1
 
 p = plot(; ylabel = "validation GB/s  (log, higher = better)", yscale = :log10, ylims = (0.3, 140),
     title = "UTF-8 validation: our SIMD validator vs Base & simdutf8  (16 MiB, single-thread)",
-    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560))
+    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560),
+    left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm)
 for (g, corp) in enumerate(corpora)
     for (c, (pre, col, role)) in enumerate(roles)
         key = "$pre: $corp"; haskey(cmap, key) || continue

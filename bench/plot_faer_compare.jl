@@ -8,6 +8,7 @@
 # (OpenBLAS · faer · ours) of the per-sample GFLOP/s distribution (higher = better, so "ours" sits on top).
 # The ours/faer median ratio is annotated over each group.
 using JSON, StatsPlots, Printf, Statistics
+using StatsPlots: mm          # margin unit (not exported by default)
 
 const HERE = @__DIR__
 const DATA = joinpath(HERE, "results", "compare_factorizations.json")
@@ -24,6 +25,7 @@ function plot_algo(label, kind, rows)
     plt = plot(; legend = :topleft, xlabel = "matrix size n", ylabel = "GFLOP/s  (higher = better)",
         title = "$label — single-thread, per-sample distribution", titlefontsize = 11,
         framestyle = :box, dpi = 200, size = (820, 500),
+        left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm,
         xticks = (1:length(sizes), string.(sizes)))
     ymax = 0.0
     for (gi, n) in enumerate(sizes)            # one group per size

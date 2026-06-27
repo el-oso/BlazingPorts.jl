@@ -1,6 +1,7 @@
 # regex match throughput — VIOLIN of the saved per-sample distributions (no re-benchmark). Log-y.
 # Regenerate:  julia --project=bench bench/plot_regex.jl
 using JSON, StatsPlots, Printf, Statistics
+using StatsPlots: mm          # margin unit (not exported by default)
 const HERE = @__DIR__
 const NB = 8 * 1024 * 1024
 d = JSON.parsefile(joinpath(HERE, "results", "regex.json"))
@@ -15,7 +16,8 @@ step = 3
 
 p = plot(; ylabel = "match throughput GB/s  (log, higher = better)", yscale = :log10, ylims = (0.1, 120),
     title = "regex match throughput: Rust regex crate vs Julia PCRE2  (8 MiB, single-thread)",
-    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560))
+    titlefontsize = 10, legend = :topright, framestyle = :box, dpi = 200, size = (1000, 560),
+    left_margin = 8mm, bottom_margin = 5mm, top_margin = 3mm, right_margin = 3mm)
 for (g, pat) in enumerate(pats)
     for (c, (pre, col, role)) in enumerate(roles)
         key = "$pre: $pat"; haskey(cmap, key) || continue
