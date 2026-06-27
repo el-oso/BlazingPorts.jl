@@ -153,6 +153,26 @@ isn't the bottleneck there) — full size-sweep in the fork's `perf/string_scan_
 `@assert_no_scalar_loops` was blind to a scalar loop coexisting with vectorized code. Reproduce:
 `bench/probe_simdjson.jl` → `bench/results/simdjson.json` → `bench/plot_simdjson.jl`.
 
+## simdutf8 → ⚠ genuine 11× gap on multibyte UTF-8 (pure Julia — a real port target)
+
+UTF-8 validation is a **shuffle/range-check SIMD kernel** (the lemire algorithm: `pshufb` lookups +
+range comparisons, near-zero *arithmetic* intensity) — the unexplored "non-arithmetic SIMD" class. Two
+regimes, 16 MiB, single-thread:
+
+![UTF-8 validation: Julia isvalid vs Rust std & simdutf8](assets/simdutf8.png)
+
+- **ASCII fast-path: parity.** Julia `isvalid` 72.1 vs simdutf8 78.5 GB/s = **0.92×** (and **1.7× over Rust
+  scalar `std::str::from_utf8`**) — Julia already SIMD-checks the all-`<0x80` case.
+- **Mixed UTF-8 (~1-in-6 multibyte): an 11× gap.** Julia falls to its scalar multibyte codepath —
+  **1.65 vs simdutf8 17.66 GB/s = 0.09×** — the moment non-ASCII appears. (Rust scalar `std` is 0.40;
+  simdutf8 is 44× over its own scalar.)
+
+Unlike regex (PCRE2 is C) this is a **genuine Julia-vs-SIMD gap in pure Julia code**, and a **bounded port**:
+a pure-Julia SIMD validator (lemire stage-2 continuation/range checks via `Vec`/shuffles). Workload note:
+English/ASCII text is at parity; the gap is for accented/CJK/emoji-heavy text. It's also the campaign's best
+**StrictMode-feedback target** — a kernel with ~0 FP/int arithmetic, the conjectured blind spot of
+`kernel_report`'s arithmetic-intensity model.
+
 ## regex / ripgrep → ⚠ large gap, but PCRE2(C)-vs-Rust (not Julia-vs-Rust)
 
 Julia's `Regex` is **PCRE2** (a JIT'd C library); the Rust `regex` crate is a lazy-DFA with a Teddy/memchr

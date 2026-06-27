@@ -656,3 +656,14 @@ pub extern "C" fn bp_regex_count(h: *const RRegex, hay: *const u8, hlen: usize) 
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn bp_regex_free(h: *mut RRegex) { unsafe { drop(Box::from_raw(h)); } }
+
+// ── simdutf8 (Tier 3 GP): SIMD UTF-8 validation (lemire algorithm — range checks + shuffles, NOT
+// arithmetic SIMD). vs Julia `isvalid(::String)` (scalar) and Rust std `from_utf8` (scalar) baselines.
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_simdutf8_validate(p: *const u8, len: usize) -> bool {
+    simdutf8::basic::from_utf8(unsafe { std::slice::from_raw_parts(p, len) }).is_ok()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bp_std_validate(p: *const u8, len: usize) -> bool {
+    std::str::from_utf8(unsafe { std::slice::from_raw_parts(p, len) }).is_ok()
+}

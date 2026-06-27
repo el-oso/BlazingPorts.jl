@@ -39,6 +39,7 @@ bumpalo = "3"             # bump / arena allocator (Tier 2 GP)
 blake3 = { version = "1", default-features = false }  # SIMD tree hashing (Tier 3 GP) — no rayon
 simd-json = "0.17.0"
 regex = "1.12.4"
+simdutf8 = "0.1.5"
 
 [profile.release]
 opt-level = 3
