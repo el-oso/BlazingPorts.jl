@@ -41,18 +41,21 @@ compress is where throughput is decided.
 
 ![BLAKE3 two phases](assets/blake3_pipeline.png)
 
-### The three-way measurement (this is the real finding)
+### The measurement (this is the real finding)
 
 We built a shim that calls blake3's *own* code with a selectable backend, and benchmarked our kernel
-head-to-head against it — compress-only, 16 MiB, single-thread, same hardware:
+head-to-head against it — compress-only, 16 MiB, single-thread, same hardware. The fourth bar is **our
+own `blake3_asm` switch path** (a `ccall` into the vendored `.S` plus the output transpose-back) — it
+lands on the crate's hand-asm bar, proving the switch reaches the asm ceiling *from Julia*:
 
-![BLAKE3 compress: Julia vs Rust vs hand-asm](assets/blake3_kernels.png)
+![BLAKE3 compress: Rust vs Julia vs hand-asm vs our blake3_asm switch](assets/blake3_kernels.png)
 
 | | GB/s | what it is |
 |---|---|---|
-| **Julia `SIMD.jl` → LLVM, AVX-512 16-wide** | **7.46** | our kernel — pure Julia, no assembly |
-| blake3 pure-Rust (`rust_avx2` → LLVM, 8-wide) | 4.68 | the best **the Rust compiler** produces |
-| blake3 hand-written assembly (`.S`, AVX-512) | 8.36 | a hand-tuned `.S` file the crate bundles |
+| **Julia `SIMD.jl` → LLVM, AVX-512 16-wide** | **7.50** | our kernel — pure Julia, no assembly |
+| blake3 pure-Rust (`rust_avx2` → LLVM, 8-wide) | 4.67 | the best **the Rust compiler** produces |
+| blake3 hand-written assembly (`.S`, AVX-512) | 8.34 | a hand-tuned `.S` file the crate bundles |
+| **BlazingPorts asm-leaf (`blake3_asm` switch)** | **8.26** | the *same* `.S`, reached via our `ccall` = 0.99× the crate |
 
 The result that matters: **at the language level — LLVM vs LLVM — Julia wins, 1.60×.** blake3 has *no*
 pure-Rust AVX-512 path (there is no `rust_avx512.rs`; AVX-512 in blake3 is **assembly only**), so without

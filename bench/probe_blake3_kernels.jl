@@ -38,6 +38,22 @@ end
     GC.@preserve data OUT B3._blake3_raw(pointer(data), NB, pointer(OUT))
     Base.donotdelete(OUT); @inbounds OUT[1]
 end
+
+# our SWITCH path at compress-kernel scope: _compress_N_chunks_full routes through the vendored .S
+# (blake3_hash_many_avx512) when blake3_asm is active. Same kernel as the crate's hand-asm bar, but
+# reached via OUR ccall + the output transpose-back — i.e. exactly what the switch delivers per batch.
+@noinline function ours_asm()
+    acc = Vec{16,UInt32}(0); nbat = (NB - 1) ÷ (16 * 1024)
+    GC.@preserve data begin
+        p = pointer(data)
+        for k in 0:nbat-1
+            v1,v2,v3,v4,v5,v6,v7,v8 = B3._compress_N_chunks_full(B3._BasePtr16(p + k*16*1024),
+                B3.KEY1,B3.KEY2,B3.KEY3,B3.KEY4,B3.KEY5,B3.KEY6,B3.KEY7,B3.KEY8, UInt64(k)*16)
+            acc ⊻= v1 ⊻ v8
+        end
+    end
+    Base.donotdelete(acc); sum(acc)
+end
 # blake3 via its own platform hash_many: which=0 AVX-512 asm, which=1 AVX2 pure-Rust intrinsics
 @noinline function bl3(which::UInt32)
     GC.@preserve data OUT ccall((:bp_blake3_hashmany, LIB), Cvoid,
@@ -57,11 +73,16 @@ g(p) = NB / p.median / 1e9
 
 probes = Probe[p_jl, p_rs, p_asm]
 
-# ── Preferences switch: full blake3() pipeline, asm-leaf ON vs forced PURE (same process) ───────────
+# ── Preferences switch: add OUR asm-leaf (kernel scope) as the 4th bar, then the full-pipeline pair ──
 if B3._asm_active()
     saved = B3._ASM_FN[]
     try
         B3._ASM_FN[] = saved                              # asm leaf on
+        ours_asm()
+        p_our_asm = run_probe("BlazingPorts asm-leaf (blake3_asm)", ours_asm; seconds = 4.0)
+        push!(probes, p_our_asm)
+        @printf("  BlazingPorts asm-leaf (switch, our ccall):  %.2f GB/s   → vs crate asm = %.2f×\n",
+            g(p_our_asm), g(p_our_asm)/g(p_asm))
         full_hash()
         p_full_asm = run_probe("BlazingPorts.blake3() asm-leaf", full_hash; seconds = 8.0)
         B3._ASM_FN[] = Ptr{Cvoid}(0)                      # force pure leaf
