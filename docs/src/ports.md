@@ -165,16 +165,23 @@ moment multibyte appears** (1.66 vs simdutf8 18 GB/s). Unlike regex (PCRE2 is C)
 
 ![UTF-8 validation: our SIMD validator vs Base & simdutf8](assets/simdutf8.png)
 
-- **Mixed UTF-8 (multibyte): `isvalid_utf8` 18.6 vs Base 1.66 GB/s = 11× faster, and 1.04× simdutf8 — it
-  beats the Rust crate.** (The first cut was SSE-16 at 0.56× simdutf8; widening to AVX2 `Vec{32}` cleared
-  the gap — `shufflevector` handles the cross-128-lane byte-shift that the C uses `valignr`+`permute2x128`
-  for, and the 16-byte `pshufb` tables are duplicated across both lanes.)
-- **ASCII fast-path: parity** with Base (~71 GB/s, bandwidth-bound; the chunked `vpmovmskb` ASCII check).
+It **beats the Rust crate on both regimes** (pushing to ≥0.96× the crate — not just beating Base — is the
+contract, and is what forces the limiting factor into the open):
 
-This is a SHUFFLE/LOOKUP kernel (≈0 arithmetic intensity), and auditing it produced **StrictMode F33**:
-`kernel_report` counts FP/int arithmetic + memory ops but **not** the `pshufb` shuffles — the kernel's
-actual work — so it mischaracterizes a perfectly-vectorized shuffle kernel ("balanced / try cache
-blocking", irrelevant for a shuffle-port-bound kernel). The conjectured data-movement blind spot, confirmed.
+- **Mixed UTF-8 (multibyte): `isvalid_utf8` 18.4 vs Base 1.66 = 11× faster, 1.05× simdutf8.** *Limiting
+  factor: vector width.* The first cut was SSE-16 at 0.56× simdutf8; widening to AVX2 `Vec{32}` cleared it
+  (`shufflevector` does the cross-128-lane byte-shift the C uses `valignr`+`permute2x128` for; the 16-byte
+  `pshufb` tables are duplicated across both lanes).
+- **ASCII fast-path: 0.96–1.01× simdutf8 / parity with Base.** *Limiting factor: memory **latency**, not
+  bandwidth.* Both sit near bandwidth (~72 GB/s), but simdutf8 was ~8% ahead until an explicit `prefetch`
+  (one chunk ahead) + a 128-byte chunk closed it.
+
+**Two limiting factors → two StrictMode lessons** (the reason to push to parity rather than stop at "beats
+Base"): (1) **F33** — auditing the multibyte kernel, `kernel_report` counts FP/int arithmetic + memory ops
+but **not** the `pshufb` shuffles (the actual work), so it mischaracterizes a shuffle-port-bound kernel as
+"balanced / try cache blocking"; the conjectured data-movement blind spot, confirmed. (2) **F34 (candidate)**
+— the ASCII gap was memory-*latency*-bound (prefetch helped), but `kernel_report`'s compute-vs-memory
+intensity doesn't distinguish latency-bound (prefetch helps) from bandwidth-bound (it doesn't).
 Next: the same `pshufb` machinery folds straight into a **base64 / hex** SIMD library (the byte-ops cluster).
 
 ## byte-ops family (bytecount · base64 · hex · float-parse) → the shuffle-SIMD gap class

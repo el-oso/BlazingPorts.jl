@@ -30,6 +30,8 @@ const _MOVEMASK = ("declare i32 @llvm.x86.avx2.pmovmskb(<32 x i8>)\ndefine i32 @
 @inline _pshufb(t::Vec{32,UInt8}, i::Vec{32,UInt8}) = Vec(Base.llvmcall(_PSHUFB, _V32, Tuple{_V32,_V32}, t.data, i.data))
 @inline _usubsat(a::Vec{32,UInt8}, b::Vec{32,UInt8}) = Vec(Base.llvmcall(_USUBSAT, _V32, Tuple{_V32,_V32}, a.data, b.data))
 @inline _movemask(v::Vec{32,UInt8}) = Base.llvmcall(_MOVEMASK, Int32, Tuple{_V32}, v.data)
+const _PREFETCH = ("declare void @llvm.prefetch.p0(ptr, i32, i32, i32)\ndefine void @e(i64 %p) #0 {\n%a = inttoptr i64 %p to ptr\ncall void @llvm.prefetch.p0(ptr %a, i32 0, i32 3, i32 1)\nret void\n}\nattributes #0 = { alwaysinline }", "e")
+@inline _prefetch(p::Ptr{UInt8}) = Base.llvmcall(_PREFETCH, Cvoid, Tuple{UInt}, reinterpret(UInt, p))
 
 # ── lookup tables (exact, from simdutf8 `algorithm.rs`) — 16-byte tables duplicated across both lanes ─
 _dup(t::NTuple{16,UInt8}) = Vec{32,UInt8}((t..., t...))
@@ -68,15 +70,19 @@ end
 function _isvalid_utf8(p::Ptr{UInt8}, n::Int)
     prev = _ZERO; incomplete = _ZERO; error = _ZERO
     i = 0
-    @inbounds while i + 64 <= n                       # 64-byte chunk = 2 blocks: one ASCII check amortized
-        v0 = vload(Vec{32,UInt8}, p + i); v1 = vload(Vec{32,UInt8}, p + i + 32)
-        if _ascii(v0 | v1)
-            error |= incomplete; prev = v1; incomplete = _ZERO
+    @inbounds while i + 128 <= n                      # 128-byte chunk (4 blocks): amortize the ASCII check
+        i + 256 <= n && _prefetch(p + i + 256)        # prefetch one chunk ahead (hide memory latency)
+        v0 = vload(Vec{32,UInt8}, p + i);      v1 = vload(Vec{32,UInt8}, p + i + 32)
+        v2 = vload(Vec{32,UInt8}, p + i + 64); v3 = vload(Vec{32,UInt8}, p + i + 96)
+        if _ascii(v0 | v1 | v2 | v3)
+            error |= incomplete; prev = v3; incomplete = _ZERO
         else
             error, prev, incomplete = _check_block(error, prev, v0)
             error, prev, incomplete = _check_block(error, prev, v1)
+            error, prev, incomplete = _check_block(error, prev, v2)
+            error, prev, incomplete = _check_block(error, prev, v3)
         end
-        i += 64
+        i += 128
     end
     @inbounds while i + 32 <= n                       # 32-byte remainder
         input = vload(Vec{32,UInt8}, p + i)
