@@ -93,16 +93,17 @@ function _isvalid_utf8(p::Ptr{UInt8}, n::Int)
         end
         i += 32
     end
-    if i < n                                          # tail (< 32 bytes): copy into a zero-padded buffer
-        buf = zeros(UInt8, 32)
-        @inbounds for k in 1:(n - i); buf[k] = unsafe_load(p, i + k); end
-        GC.@preserve buf begin
-            input = vload(Vec{32,UInt8}, pointer(buf))
-            if _ascii(input)
-                error |= incomplete; incomplete = _ZERO
-            else
-                error, prev, incomplete = _check_block(error, prev, input)
-            end
+    if i < n                                          # tail (< 32 bytes): zero-padded, stack-only
+        # NTuple-built padded block instead of a heap buffer: `zeros(UInt8, 32)` here allocated on
+        # every non-multiple-of-32 input (caught by the StrictMode bench audit, 2026-07-02). The
+        # `let` gives the closure never-reassigned captures (`i` is loop-mutated → Core.Box trap).
+        input = let pt = p + i, r = n - i
+            Vec{32, UInt8}(ntuple(k -> k <= r ? unsafe_load(pt, k) : 0x00, Val(32)))
+        end
+        if _ascii(input)
+            error |= incomplete; incomplete = _ZERO
+        else
+            error, prev, incomplete = _check_block(error, prev, input)
         end
     end
     error |= incomplete
