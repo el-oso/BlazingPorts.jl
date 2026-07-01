@@ -21,3 +21,4 @@ Cargo.lock
 # are tracked so plots can be regenerated without re-running benchmarks (see Harness.replot).
 
 .DS_Store
+.claude/hooks/.src-hash

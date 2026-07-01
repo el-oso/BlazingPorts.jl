@@ -7,3 +7,13 @@
     using BlazingPorts: MatrixMultiply
     @test MatrixMultiply isa Module
 end
+
+@testitem "matrixmultiply_strictmode" tags = [:matrixmultiply] begin
+    # Probe-first: the module is an empty shell until the probe ships a microkernel. The audit is
+    # wired NOW so any future kernel lands under (:vectorized, :noalloc) automatically instead of
+    # shipping unchecked (an empty module audits to zero checks — harmless).
+    using BlazingPorts: MatrixMultiply
+    using StrictMode, AllocCheck, JET
+    fs = audit(MatrixMultiply; sweep = true, guarantees = (:vectorized, :noalloc), io = devnull)
+    @test nfailures(fs) == 0
+end

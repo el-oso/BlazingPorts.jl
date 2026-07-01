@@ -28,6 +28,9 @@ VectorizationBase = "3d5dd08c-fd9d-11e8-17fa-ed2836048c2f"
 [compat]
 JSON = "1.6"   # the rewritten fast JSON.jl (lazy + isvalidjson structural scan), not 0.21.x
 
+[sources]
+StrictMode = {rev = "master", url = "https://github.com/el-oso/StrictMode.jl"}
+
 [preferences.StrictMode]
 analysis = "fast"
 checks_enabled = true

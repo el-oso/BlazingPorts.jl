@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "bash .claude/hooks/strictmode-stop.sh" }] }
+    ]
+  }
+}
