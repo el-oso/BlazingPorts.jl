@@ -15,9 +15,9 @@ TypeContracts = "c7a3f1e2-84b5-4d69-9e0a-1f2b3c4d5e6f"
 
 [compat]
 SIMD = "3"
-StrictMode = "0.3.4"
+StrictMode = "0.3.3"
 
-# assert_enabled + the require=:public coverage gate need ≥ 0.3.4; git-source until it's in General.
+# assert_enabled + the require=:public coverage gate need ≥ 0.3.3; git-source until it's in General.
 [sources]
 StrictMode = {rev = "master", url = "https://github.com/el-oso/StrictMode.jl"}
 
