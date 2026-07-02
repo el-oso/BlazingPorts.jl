@@ -46,7 +46,9 @@ const _CMPGT  = ("define <32 x i8> @e(<32 x i8> %a, <32 x i8> %b) #0 {\n%c = icm
 @inline _mulhu16(a::Vec{16,UInt16}, b::Vec{16,UInt16}) = Vec(Base.llvmcall(_MULHU, _V16w, Tuple{_V16w,_V16w}, a.data, b.data))
 @inline _cmpgtb(a::Vec{32,UInt8}, b::Vec{32,UInt8}) = Vec(Base.llvmcall(_CMPGT, _V32, Tuple{_V32,_V32}, a.data, b.data))  # 0xFF where a>b (signed)
 
-_bcast32(x::UInt32) = Vec{32,UInt8}(ntuple(i -> UInt8((x >> (8 * ((i - 1) % 4))) & 0xff), 32))
+# Val(32), not a runtime count: an un-Val'ed ntuple infers Tuple{Vararg{UInt8}} and the Vec
+# constructor dispatches dynamically (caught by the StrictMode F35 corpus study, 2026-07-02).
+_bcast32(x::UInt32) = Vec{32,UInt8}(ntuple(i -> UInt8((x >> (8 * ((i - 1) % 4))) & 0xff), Val(32)))
 const _MASK0 = _bcast32(0x0fc0fc00); const _MASK2 = _bcast32(0x003f03f0)
 const _MUL0  = reinterpret(Vec{16,UInt16}, _bcast32(0x04000040))
 const _MUL2  = reinterpret(Vec{16,UInt16}, _bcast32(0x01000010))
